@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>SambaNova Cost Lens</title>
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Claude Code + SambaNova</p>
+          <h1>Realtime token and cost dashboard</h1>
+          <p class="subtle">Shows which work ran in Claude orchestration and which work was offloaded to SambaNova coding tools.</p>
+        </div>
+        <div class="status">
+          <span class="pulse"></span>
+          <span id="updated">Waiting for logs...</span>
+        </div>
+      </section>
+
+      <section class="scoreboard">
+        <article>
+          <span>Hybrid cost</span>
+          <strong id="hybridCost">$0.0000</strong>
+          <small>Claude orchestration + SambaNova coding</small>
+        </article>
+        <article>
+          <span>All-Claude counterfactual</span>
+          <strong id="allClaudeCost">$0.0000</strong>
+          <small>Same tokens priced on Claude</small>
+        </article>
+        <article class="win">
+          <span>Savings</span>
+          <strong id="savings">$0.0000</strong>
+          <small id="savingsPct">0% cheaper</small>
+        </article>
+        <article>
+          <span>Total tokens</span>
+          <strong id="totalTokens">0</strong>
+          <small id="modelLabel">Claude model: unknown</small>
+        </article>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Claude Sessions</h2>
+          <span id="sessionCount">latest 5 sessions</span>
+        </div>
+        <div id="sessions" class="sessions"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Integration</h2>
+          <span>test from CLI</span>
+        </div>
+        <pre><code>/code MiniMax-M2.7 /Users/bowenl/work/sambanova-claude-dashborad "Review this demo and report token usage" --max-tokens 4096</code></pre>
+      </section>
+    </main>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

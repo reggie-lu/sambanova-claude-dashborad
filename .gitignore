@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ruff_cache/
+
+# Local runtime data (recreated by the app; contains local paths & prompts)
+data/*.jsonl
+
+# OS / editor
+.DS_Store
