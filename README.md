@@ -12,6 +12,24 @@ python app.py
 
 Open <http://127.0.0.1:5055>.
 
+## Dashboard experience
+
+The overview explains two setups side by side: **Full SambaNova** (Claude Code's
+agent framework with SambaNova model inference) and **Coding offload** (Claude
+orchestration with SambaNova coding-tool runs). Each has a workflow diagram and
+a setup guide with copyable commands; the guide does not change your configuration.
+
+Recent sessions carry setup badges and can be filtered by setup, including Claude-only
+and mixed-provider sessions. The filter applies to the latest 10; the saved-session
+picker still accesses the full archive. Cost cards and proportional comparison bars
+distinguish recorded token cost from the same-token all-Claude estimate. Extra cost
+is labeled explicitly when the comparison is unfavorable.
+
+Timelines stay visible. Expand **Explore tokens & requests** for token categories,
+session identity, endpoint evidence, and individual model/tool activity. Expanded
+details, setup selection, and activity-list scroll positions survive live refresh.
+The layout adapts to narrow screens and supports keyboard controls and reduced motion.
+
 The dashboard polls:
 
 - `~/.claude/projects/**/*.jsonl` for Claude Code sessions and recorded model token usage.

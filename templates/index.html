@@ -1,82 +1,98 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>SambaNova Cost Lens</title>
-    <link rel="icon" type="image/png" href="/static/sambanova-icon.png">
-    <link rel="stylesheet" href="/static/styles.css">
-  </head>
-  <body>
-    <main class="shell">
-      <section class="hero">
-        <div>
-          <div class="app-brand"><img src="/static/sambanova-icon.png" alt="SambaNova" width="44" height="40"><span>SambaNova Cost Lens</span></div>
-          <p class="eyebrow">Claude Code + SambaNova</p>
-          <h1>Realtime token and cost dashboard</h1>
-          <p class="subtle">Shows which work ran in Claude orchestration and which work was offloaded to SambaNova coding tools.</p>
-        </div>
-        <div class="status">
-          <span class="pulse"></span>
-          <span id="updated">Waiting for logs...</span>
-        </div>
-      </section>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f6f5fa">
+  <title>SambaNova Cost Lens</title>
+  <link rel="icon" type="image/png" href="/static/sambanova-icon.png">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#sessionsSection">Skip to sessions</a>
+  <header class="topbar"><div class="nav-inner">
+    <a class="app-brand" href="#"><img src="/static/sambanova-icon.png" alt="" width="32" height="32"><span>SambaNova <b>Cost Lens</b></span></a>
+    <nav aria-label="Main navigation"><a href="#options">The two setups</a><a href="#sessionsSection">Your sessions</a><a href="#pricing">Pricing</a></nav>
+    <div class="status"><span class="pulse" aria-hidden="true"></span><span id="updated" role="status">Connecting to local logs…</span></div>
+  </div></header>
+  <main class="shell">
+    <section class="hero">
+      <div><p class="eyebrow"><span></span>One agent framework. Two ways to use SambaNova.</p>
+        <h1>Keep Claude Code.<br><span>Choose how SambaNova fits.</span></h1>
+        <p class="hero-copy">Power the whole agent with SambaNova models, or keep Claude in charge and delegate coding. See where your requests run—and what the difference costs.</p>
+      </div>
+    </section>
 
-      <section class="scoreboard">
-        <article>
-          <span>Recorded usage cost</span>
-          <strong id="hybridCost">$0.0000</strong>
-          <small>API token pricing · all sessions</small>
-        </article>
-        <article>
-          <span>All-Claude counterfactual</span>
-          <strong id="allClaudeCost">$0.0000</strong>
-          <small>Reprice offloaded tokens; preserve cache categories</small>
-        </article>
-        <article class="win">
-          <span>Estimated offload savings</span>
-          <strong id="savings">$0.0000</strong>
-          <small id="savingsPct">0% cheaper</small>
-        </article>
-        <article>
-          <span>Total tokens</span>
-          <strong id="totalTokens">0</strong>
-          <small id="modelLabel">Claude model: unknown</small>
-        </article>
-      </section>
+    <section id="options" class="options-grid" aria-label="Two ways to use SambaNova">
+      <article class="option-card direct-option">
+        <div class="option-top"><span class="option-number">01 / FULL SAMBANOVA</span><span class="option-symbol" aria-hidden="true">↗</span></div>
+        <h2>Claude Code.<br>SambaNova models.</h2>
+        <p>Use the Claude Code agent framework while SambaNova serves every model request.</p>
+        <div class="workflow" aria-label="Claude Code agent framework sends all model requests to SambaNova">
+          <div class="flow-node framework-node"><img src="/static/claude-icon.png" alt="" width="22" height="22"><b>Claude Code</b><small>Agent framework</small></div>
+          <span class="flow-arrow" aria-hidden="true">→</span>
+          <div class="flow-node samba-node"><img src="/static/sambanova-icon.png" alt="" width="22" height="22"><b>SambaNova</b><small>All model requests</small></div>
+        </div>
+        <ul class="option-benefits"><li>Keep the terminal workflow and agent tools</li><li>Use a SambaNova model, such as MiniMax-M3</li><li>Model usage is billed on SambaNova</li></ul>
+        <div class="option-bottom"><span><i class="legend-dot purple"></i>Purple session timeline</span><button id="directSetup" class="button primary" type="button" aria-controls="setupGuide">See this setup <span aria-hidden="true">→</span></button></div>
+      </article>
+      <article class="option-card hybrid-option">
+        <div class="option-top"><span class="option-number">02 / CODING OFFLOAD</span><span class="option-symbol" aria-hidden="true">⇄</span></div>
+        <h2>Claude leads.<br>SambaNova codes.</h2>
+        <p>Keep Claude for the main conversation and orchestration. Hand coding tasks to a SambaNova-powered tool.</p>
+        <div class="workflow hybrid-flow" aria-label="Claude plans, SambaNova coding tool works, Claude continues">
+          <div class="flow-node claude-node"><img src="/static/claude-icon.png" alt="" width="22" height="22"><b>Claude</b><small>Plan & orchestrate</small></div><span class="flow-arrow" aria-hidden="true">→</span>
+          <div class="flow-node samba-node"><img src="/static/sambanova-icon.png" alt="" width="22" height="22"><b>SambaNova</b><small>Coding tool</small></div><span class="flow-arrow" aria-hidden="true">→</span>
+          <div class="flow-node claude-node"><b>Claude</b><small>Continue</small></div>
+        </div>
+        <ul class="option-benefits"><li>Keep Claude’s model for your main agent</li><li>Delegate coding with the SambaNova /code tool</li><li>Compare the combined cost with all-Claude usage</li></ul>
+        <div class="option-bottom"><span><i class="legend-dot orange"></i><i class="legend-dot purple"></i>Orange + purple timeline</span><button id="hybridSetup" class="button secondary" type="button" aria-controls="setupGuide">See this setup <span aria-hidden="true">→</span></button></div>
+      </article>
+    </section>
+    <p class="options-caption">Claude Code is the agent framework. Claude and SambaNova are the model providers. Your session’s recorded endpoint determines where its model usage belongs.</p>
 
-      <section class="panel">
-        <div class="panel-head">
-          <h2>Claude Sessions</h2>
-          <span id="sessionCount">Latest 10 sessions</span>
-        </div>
-        <div id="sessions" class="sessions"></div>
-        <div class="session-browser">
-          <h3>Browse saved sessions</h3>
-          <label for="sessionPicker">Choose a session from your logs</label>
-          <select id="sessionPicker"><option value="">Choose a saved session…</option></select>
-          <p id="sessionPickerStatus" class="subtle" role="status">Loading saved sessions…</p>
-          <div id="selectedSession" class="sessions"></div>
-        </div>
-      </section>
+    <details id="setupGuide" class="setup-guide">
+      <summary><span class="setup-summary-icon" aria-hidden="true">⌘</span>Get started with either setup<span class="summary-hint">Commands & how it works</span></summary>
+      <div class="setup-content">
+        <div class="segmented" aria-label="Choose a setup"><button id="guideDirect" type="button" aria-pressed="true">01 Full SambaNova</button><button id="guideHybrid" type="button" aria-pressed="false">02 Coding offload</button></div>
+        <div id="setupContent"></div>
+      </div>
+    </details>
 
-      <section class="panel">
-        <details><summary>Pricing and token accounting</summary>
-          <p id="pricingDate" class="subtle"></p>
-          <p><a href="https://cloud.sambanova.ai/plans/pricing" target="_blank" rel="noreferrer">SambaNova pricing</a> · <a href="https://platform.claude.com/docs/en/about-claude/pricing" target="_blank" rel="noreferrer">Claude pricing</a></p>
-          <p class="method-note">Input means fresh input; cache reads and writes are separate and included in total tokens. Output includes reasoning reported by the local SambaNova tracker. Per-step costs cover all tools in that request. Models absent from this table are marked “Fallback rate”.</p>
-          <div class="table-scroll"><table><thead><tr><th>Model</th><th>Input</th><th>Output</th><th>Cache read</th><th>Write 5m</th><th>Write 1h</th></tr></thead><tbody id="rateRows"></tbody></table></div>
-        </details>
-      </section>
-      <section class="panel">
-        <div class="panel-head">
-          <h2>Integration</h2>
-          <span>test from CLI</span>
-        </div>
-        <p class="subtle">Claude-only coding activity is estimated automatically. To record actual SambaNova activity, run:</p>
-        <pre><code>/code MiniMax-M2.7 /Users/bowenl/work/sambanova-claude-dashborad "Review this demo and report token usage" --max-tokens 4096</code></pre>
-      </section>
-    </main>
-    <script src="/static/app.js"></script>
-  </body>
+    <section class="overview" aria-labelledby="overviewTitle">
+      <div class="section-heading"><div><p class="eyebrow">YOUR USAGE, IN PERSPECTIVE</p><h2 id="overviewTitle">See what your setup saves.</h2></div><span class="scope-label">All recorded sessions · USD</span></div>
+      <div class="scoreboard">
+        <article class="actual-score"><span>Recorded usage cost</span><strong id="hybridCost">—</strong><small>Claude + SambaNova at API rates</small></article>
+        <article><span>If everything ran on Claude</span><strong id="allClaudeCost">—</strong><small>Estimated using the same token counts</small></article>
+        <article id="savingsCard" class="win"><span id="savingsLabel">Estimated savings</span><strong id="savings">—</strong><small id="savingsPct">Waiting for usage…</small></article>
+        <article><span>Tokens processed</span><strong id="totalTokens">—</strong><small id="modelLabel">Input, output and cache usage</small></article>
+      </div>
+      <p class="accounting-caption">A token-cost comparison, not a subscription bill. Estimates preserve recorded cache usage; another model may use different tokens or produce different results.</p>
+    </section>
+
+    <section id="sessionsSection" class="sessions-section" aria-labelledby="sessionsTitle">
+      <div class="section-heading"><div><p class="eyebrow">FOLLOW THE WORK</p><h2 id="sessionsTitle">Your sessions</h2></div><span class="scope-label" id="sessionCount">Latest 10 sessions</span></div>
+      <div class="session-toolbar"><div class="filter-group"><label for="sessionFilter">Show</label><select id="sessionFilter"><option value="all">All setups</option><option value="direct">Full SambaNova</option><option value="hybrid">Coding offload</option><option value="claude">Claude only</option><option value="mixed">Mixed providers</option></select></div><span id="filterStatus" role="status">Showing your latest sessions</span><a href="#sessionArchive" class="text-link">Browse saved sessions <span aria-hidden="true">↓</span></a></div>
+      <div id="sessions" class="sessions"></div>
+      <div id="sessionArchive" class="session-browser panel">
+        <div class="archive-heading"><span class="archive-icon" aria-hidden="true">↶</span><div><h3>Pick up an older session</h3><p>Every saved session is still here. Choose one to inspect its costs and requests.</p></div></div>
+        <label for="sessionPicker">Browse saved sessions</label>
+        <select id="sessionPicker"><option value="">Choose a saved session…</option></select>
+        <p id="sessionPickerStatus" class="subtle" role="status">Loading saved sessions…</p>
+        <div id="selectedSession" class="sessions"></div>
+      </div>
+    </section>
+
+    <section id="pricing" class="panel pricing-panel">
+      <details><summary>Pricing & how we count usage<span class="summary-hint">Transparent by design</span></summary>
+        <p id="pricingDate" class="subtle"></p>
+        <p><a href="https://cloud.sambanova.ai/plans/pricing" target="_blank" rel="noreferrer">SambaNova pricing ↗</a> · <a href="https://platform.claude.com/docs/en/about-claude/pricing" target="_blank" rel="noreferrer">Claude pricing ↗</a></p>
+        <p class="method-note">Fresh input, cache reads and cache writes are separate categories. Total tokens includes all of them plus output. Requests are counted once, even when they call several tools. Unknown model prices are labeled “Fallback rate”. Timelines show observed elapsed time, including tools and waiting—not decoding time.</p>
+        <div class="table-scroll"><table><thead><tr><th scope="col">Model</th><th scope="col">Input</th><th scope="col">Output</th><th scope="col">Cache read</th><th scope="col">Write 5m</th><th scope="col">Write 1h</th></tr></thead><tbody id="rateRows"></tbody></table></div>
+      </details>
+    </section>
+    <footer><span>SambaNova Cost Lens</span><span>Local logs. Clear costs. Your choice.</span><a href="#">Back to top ↑</a></footer>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
 </html>

@@ -13,6 +13,7 @@ test('saved-session selection survives refresh, clears, and handles missing logs
     assert(!['estimateModel', 'estimateSummary'].includes(id), 'Removed panel is not accessed');
     if (!elements.has(id)) elements.set(id, {
       innerHTML: '', textContent: '', value: '', disabled: false, handlers: {},
+      attributes: {}, setAttribute(name, value) { this.attributes[name] = value; },
       querySelectorAll: () => [],
       addEventListener(name, handler) { this.handlers[name] = handler; },
     });
@@ -96,7 +97,15 @@ test('saved-session selection survives refresh, clears, and handles missing logs
   assert(activity.indexOf('new-request') < activity.indexOf('old-request'));
   assert(activity.includes('Usage pending'));
   assert(activity.includes('Request details unavailable for this run'));
-  assert(!activity.includes('<details'));
+  assert(activity.includes('Explore tokens &amp; requests') || activity.includes('Explore tokens & requests'));
+  assert(activity.includes('data-disclosure="sessions-session-0-requests"'));
+  // Opening request details survives automatic refresh and filtering.
+  element('sessions').querySelectorAll = (selector) => selector === '[data-disclosure]'
+    ? [{dataset: {disclosure: 'sessions-session-0-requests'}, open: true}] : [];
+  sessions[0].updated_at = '2026-09-22T12:01:00Z';
+  await vm.runInContext('refresh()', context);
+  assert(element('sessions').innerHTML.includes('data-disclosure="sessions-session-0-requests" open'));
+  element('sessions').querySelectorAll = () => [];
   // The framework name does not assign direct M3 traffic to Claude's provider lane.
   const direct = sessions[1];
   direct.models = {};
@@ -121,6 +130,34 @@ test('saved-session selection survives refresh, clears, and handles missing logs
   assert(!directHtml.includes('claude-time'));
   assert(!directHtml.includes('Usage pending'));
   assert(directHtml.includes('Claude model activity · 0 requests'));
+  assert(directHtml.includes('01 · Full SambaNova'));
+  element('sessionFilter').value = 'direct';
+  element('sessionFilter').handlers.change();
+  assert.equal((element('sessions').innerHTML.match(/<article class="session">/g) || []).length, 1);
+  assert(element('sessions').innerHTML.includes('session-1'));
+  await vm.runInContext('refresh()', context);
+  assert.equal(element('filterStatus').textContent, '1 of 10 recent sessions shown');
+  element('sessionFilter').value = 'mixed';
+  element('sessionFilter').handlers.change();
+  assert(element('sessions').innerHTML.includes('No sessions to show here yet.'));
+  element('sessionFilter').value = 'all';
+  element('sessionFilter').handlers.change();
+  element('hybridSetup').handlers.click();
+  assert.equal(element('setupGuide').open, true);
+  assert.equal(element('guideHybrid').attributes['aria-pressed'], 'true');
+  assert(element('setupContent').innerHTML.includes('/code MiniMax-M3'));
+  assert(!element('setupContent').innerHTML.includes('Switch back to Claude'));
+  element('guideDirect').handlers.click();
+  assert(element('setupContent').innerHTML.includes('ANTHROPIC_BASE_URL'));
+  assert(element('setupContent').innerHTML.includes('YOUR_SAMBANOVA_API_KEY'));
+  await element('copySetup').handlers.click();
+  assert(element('copyStatus').textContent.includes('Copy unavailable'));
+  assert(element('setupContent').innerHTML.includes('Switch back to Claude'));
+  let copiedCommands = '';
+  context.navigator = {clipboard: {writeText: async (value) => { copiedCommands = value; }}};
+  await element('copyReturnToClaude').handlers.click();
+  assert.equal(copiedCommands, 'unset ANTHROPIC_BASE_URL\nunset ANTHROPIC_API_KEY\nunset ANTHROPIC_AUTH_TOKEN\nunset ANTHROPIC_MODEL');
+  assert(element('copyReturnStatus').textContent.includes('Copied.'));
   element('sessionPicker').handlers.change({target: {value: 'session-27'}});
   await tick();
   assert(requests.at(-1).includes('session_id=session-27'));
