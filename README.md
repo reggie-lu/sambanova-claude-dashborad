@@ -49,3 +49,47 @@ curl -X POST http://127.0.0.1:5055/api/sambanova-runs \
 ## Pricing
 
 Rates live in `rates.json` as USD per 1M input/output tokens. Claude defaults use public Anthropic API pricing. SambaNova rates are intentionally editable because account/model pricing can change.
+
+## Activity and estimates
+
+- SambaNova runs expand into model steps and individual tool calls from the tracked
+  `log_path` (OpenCode JSONL). Token usage and cost belong to the model step; multiple
+  tools share that request. Missing historical logs show aggregate usage only.
+- Claude transcript fragments with the same API message ID are merged before counting
+  usage. Input, output, cache reads, and cache writes are shown separately.
+- Claude-only sessions get a SambaNova estimate for requests containing file tools
+  or recognized development shell commands. Delegation and SambaNova launch commands
+  are excluded. The entire qualifying request is priced once; other requests stay
+  on Claude. This is a heuristic, not a semantic coding classifier.
+- Select the target SambaNova model above the sessions. The no-cache estimate prices
+  all source prompt tokens as fresh input. A second scenario assumes the same cache
+  hits; source cache writes use the SambaNova input rate. Actual tokenization, context,
+  output, and task quality may differ. Estimates never increase recorded token totals.
+- Pricing is in USD per million tokens, verified against the linked provider pages on
+  2026-09-21. Unknown models use a visibly labeled fallback. These are standard API
+  token costs, not subscription bills or negotiated rates; extra tool fees and premium
+  service modifiers are not included.
+- Manual run ingestion can include `claude_session_id` for exact session matching.
+  Without it, runs are matched using time plus working-directory or transcript evidence.
+
+Run accounting checks with `.venv/bin/python -m unittest discover -s tests -v`.
+
+## Per-session all-Claude comparison
+
+Each session has a fourth cost card: **If all usage ran on Claude**. It preserves
+recorded Claude cost and reprices the SambaNova usage on the session's most frequent
+Claude model. Fresh input, output, cache reads, and cache writes stay separate;
+SambaNova cache writes are assumed to use Claude's 5-minute cache duration. If the
+session has no Claude model, the dashboard labels the overall model fallback.
+
+- Estimated savings = all-Claude estimate − combined recorded cost.
+- Percent saved = savings / all-Claude estimate × 100.
+- All-Claude percent more = savings / combined recorded cost × 100.
+
+Zero denominators show no percentage; higher combined costs show an extra-cost
+message. Comparisons assume the same tokens and cache hits, not identical actual
+usage or task quality across models. Global comparisons use the same per-session
+models, with the overall model used only for unmatched runs.
+
+The local `static/sambanova-icon.png` is the official icon downloaded from
+https://sambanova.ai/hubfs/sambanova-favicon.png, used in the header and browser tab.

@@ -1,20 +1,171 @@
 {
-  "_comment": "Per-1M-token USD rates. Claude rates mirror Anthropic public API pricing as of 2026-07-08. SambaNova rates are configurable; defaults are seeded from the existing local code-cost skill.",
+  "_comment": "USD per 1M tokens, standard API rates. Costs are token-based estimates, not subscription charges. Unknown models use labeled fallback rates.",
+  "_verified_at": "2026-09-21",
+  "_sources": {
+    "claude": "https://platform.claude.com/docs/en/about-claude/pricing",
+    "sambanova": "https://cloud.sambanova.ai/plans/pricing"
+  },
   "claude": {
-    "_default": { "input": 3.0, "output": 15.0 },
-    "claude-opus-4-8": { "input": 5.0, "output": 25.0 },
-    "claude-opus-4-7": { "input": 5.0, "output": 25.0 },
-    "claude-sonnet-4-6": { "input": 3.0, "output": 15.0 },
-    "claude-haiku-4-5": { "input": 1.0, "output": 5.0 }
+    "claude-fable-5-1": {
+      "input": 10,
+      "output": 50,
+      "cached_input": 0.25,
+      "cache_write_5m": 12.5,
+      "cache_write_1h": 20
+    },
+    "claude-mythos-5-1": {
+      "input": 10,
+      "output": 50,
+      "cached_input": 0.25,
+      "cache_write_5m": 12.5,
+      "cache_write_1h": 20
+    },
+    "claude-fable-5": {
+      "input": 10,
+      "output": 50,
+      "cached_input": 1.0,
+      "cache_write_5m": 12.5,
+      "cache_write_1h": 20
+    },
+    "claude-mythos-5": {
+      "input": 10,
+      "output": 50,
+      "cached_input": 1.0,
+      "cache_write_5m": 12.5,
+      "cache_write_1h": 20
+    },
+    "claude-opus-5": {
+      "input": 5,
+      "output": 25,
+      "cached_input": 0.5,
+      "cache_write_5m": 6.25,
+      "cache_write_1h": 10
+    },
+    "claude-opus-4-8": {
+      "input": 5,
+      "output": 25,
+      "cached_input": 0.5,
+      "cache_write_5m": 6.25,
+      "cache_write_1h": 10
+    },
+    "claude-opus-4-7": {
+      "input": 5,
+      "output": 25,
+      "cached_input": 0.5,
+      "cache_write_5m": 6.25,
+      "cache_write_1h": 10
+    },
+    "claude-opus-4-6": {
+      "input": 5,
+      "output": 25,
+      "cached_input": 0.5,
+      "cache_write_5m": 6.25,
+      "cache_write_1h": 10
+    },
+    "claude-opus-4-5": {
+      "input": 5,
+      "output": 25,
+      "cached_input": 0.5,
+      "cache_write_5m": 6.25,
+      "cache_write_1h": 10
+    },
+    "claude-opus-4-1": {
+      "input": 15,
+      "output": 75,
+      "cached_input": 1.5,
+      "cache_write_5m": 18.75,
+      "cache_write_1h": 30
+    },
+    "claude-opus-4": {
+      "input": 15,
+      "output": 75,
+      "cached_input": 1.5,
+      "cache_write_5m": 18.75,
+      "cache_write_1h": 30
+    },
+    "claude-sonnet-5": {
+      "input": 2,
+      "output": 10,
+      "cached_input": 0.2,
+      "cache_write_5m": 2.5,
+      "cache_write_1h": 4
+    },
+    "claude-sonnet-4-6": {
+      "input": 3,
+      "output": 15,
+      "cached_input": 0.30000000000000004,
+      "cache_write_5m": 3.75,
+      "cache_write_1h": 6
+    },
+    "claude-sonnet-4-5": {
+      "input": 3,
+      "output": 15,
+      "cached_input": 0.30000000000000004,
+      "cache_write_5m": 3.75,
+      "cache_write_1h": 6
+    },
+    "claude-sonnet-4": {
+      "input": 3,
+      "output": 15,
+      "cached_input": 0.30000000000000004,
+      "cache_write_5m": 3.75,
+      "cache_write_1h": 6
+    },
+    "claude-haiku-4-5": {
+      "input": 1,
+      "output": 5,
+      "cached_input": 0.1,
+      "cache_write_5m": 1.25,
+      "cache_write_1h": 2
+    },
+    "claude-haiku-3-5": {
+      "input": 0.8,
+      "output": 4,
+      "cached_input": 0.08000000000000002,
+      "cache_write_5m": 1.0,
+      "cache_write_1h": 1.6
+    },
+    "_default": {
+      "input": 3,
+      "output": 15,
+      "cached_input": 0.3,
+      "cache_write_5m": 3.75,
+      "cache_write_1h": 6
+    }
   },
   "sambanova": {
-    "_default": { "cached_input": 0.06, "input": 0.60, "output": 2.40 },
-    "MiniMax-M2.7": { "cached_input": 0.06, "input": 0.60, "output": 2.40 },
-    "MiniMax-M2.5": { "cached_input": 0.06, "input": 0.60, "output": 2.40 },
-    "DeepSeek-V3.1-cb": { "input": 0.15, "output": 0.75 },
-    "DeepSeek-V3.1": { "input": 3.00, "output": 4.50 },
-    "DeepSeek-V3.2": { "input": 3.00, "output": 4.50 },
-    "Meta-Llama-3.3-70B-Instruct": { "input": 0.60, "output": 1.20 },
-    "gpt-oss-120b": { "input": 0.22, "output": 0.59 }
+    "MiniMax-M2.7": {
+      "input": 0.6,
+      "output": 2.4,
+      "cached_input": 0.06
+    },
+    "DeepSeek-V3.1": {
+      "input": 3,
+      "output": 4.5
+    },
+    "DeepSeek-V3.2": {
+      "input": 3,
+      "output": 4.5
+    },
+    "gemma-4-31B-it": {
+      "input": 0.38,
+      "output": 1.15
+    },
+    "gpt-oss-120b": {
+      "input": 0.22,
+      "output": 0.59
+    },
+    "Meta-Llama-3.3-70B-Instruct": {
+      "input": 0.6,
+      "output": 1.2
+    },
+    "MiniMax-M3": {
+      "input": 0.6,
+      "output": 2.4
+    },
+    "_default": {
+      "input": 0.6,
+      "output": 2.4
+    }
   }
 }

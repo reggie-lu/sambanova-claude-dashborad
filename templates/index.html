@@ -4,12 +4,14 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>SambaNova Cost Lens</title>
+    <link rel="icon" type="image/png" href="/static/sambanova-icon.png">
     <link rel="stylesheet" href="/static/styles.css">
   </head>
   <body>
     <main class="shell">
       <section class="hero">
         <div>
+          <div class="app-brand"><img src="/static/sambanova-icon.png" alt="SambaNova" width="44" height="40"><span>SambaNova Cost Lens</span></div>
           <p class="eyebrow">Claude Code + SambaNova</p>
           <h1>Realtime token and cost dashboard</h1>
           <p class="subtle">Shows which work ran in Claude orchestration and which work was offloaded to SambaNova coding tools.</p>
@@ -22,17 +24,17 @@
 
       <section class="scoreboard">
         <article>
-          <span>Hybrid cost</span>
+          <span>Recorded usage cost</span>
           <strong id="hybridCost">$0.0000</strong>
-          <small>Claude orchestration + SambaNova coding</small>
+          <small>API token pricing · all sessions</small>
         </article>
         <article>
           <span>All-Claude counterfactual</span>
           <strong id="allClaudeCost">$0.0000</strong>
-          <small>Same tokens priced on Claude</small>
+          <small>Reprice offloaded tokens; preserve cache categories</small>
         </article>
         <article class="win">
-          <span>Savings</span>
+          <span>Estimated offload savings</span>
           <strong id="savings">$0.0000</strong>
           <small id="savingsPct">0% cheaper</small>
         </article>
@@ -43,19 +45,35 @@
         </article>
       </section>
 
+      <section class="panel estimate-panel">
+        <div class="panel-head"><h2>SambaNova estimation</h2><label for="estimateModel">Coding model <select id="estimateModel" aria-label="SambaNova estimation model"></select></label></div>
+        <p id="estimateSummary" class="subtle">Calculating…</p>
+        <p class="method-note">For Claude-only sessions, identify requests containing file read, search, edit, write, or development shell tools. Price the whole request once, even when it calls several tools. Other requests stay on Claude. This heuristic can include non-coding file work and miss coding done without tools.</p>
+        <p class="method-note">Estimates reuse Claude token counts; model tokenization, context, output, and task quality can differ. “No cache reuse” prices all prompt tokens as fresh input. “With cache reuse” assumes the same cache hits; cache writes use SambaNova input rates. Hypothetical usage is excluded from recorded totals. Costs use standard API token rates, not Claude subscription charges, tool fees, or account discounts.</p>
+      </section>
+
       <section class="panel">
         <div class="panel-head">
           <h2>Claude Sessions</h2>
-          <span id="sessionCount">latest 5 sessions</span>
+          <span id="sessionCount">recent sessions</span>
         </div>
         <div id="sessions" class="sessions"></div>
       </section>
 
       <section class="panel">
+        <details><summary>Pricing and token accounting</summary>
+          <p id="pricingDate" class="subtle"></p>
+          <p><a href="https://cloud.sambanova.ai/plans/pricing" target="_blank" rel="noreferrer">SambaNova pricing</a> · <a href="https://platform.claude.com/docs/en/about-claude/pricing" target="_blank" rel="noreferrer">Claude pricing</a></p>
+          <p class="method-note">Input means fresh input; cache reads and writes are separate and included in total tokens. Output includes reasoning reported by the local SambaNova tracker. Per-step costs cover all tools in that request. Models absent from this table are marked “Fallback rate”.</p>
+          <div class="table-scroll"><table><thead><tr><th>Model</th><th>Input</th><th>Output</th><th>Cache read</th><th>Write 5m</th><th>Write 1h</th></tr></thead><tbody id="rateRows"></tbody></table></div>
+        </details>
+      </section>
+      <section class="panel">
         <div class="panel-head">
           <h2>Integration</h2>
           <span>test from CLI</span>
         </div>
+        <p class="subtle">Claude-only coding activity is estimated automatically. To record actual SambaNova activity, run:</p>
         <pre><code>/code MiniMax-M2.7 /Users/bowenl/work/sambanova-claude-dashborad "Review this demo and report token usage" --max-tokens 4096</code></pre>
       </section>
     </main>
