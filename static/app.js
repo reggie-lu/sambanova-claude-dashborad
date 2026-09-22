@@ -8,9 +8,61 @@ let selectedSessionId = "";
 let sessionIndexSignature = "";
 const scrollPositions = new Map();
 
+function durationText(milliseconds) {
+  if (milliseconds == null || !Number.isFinite(milliseconds) || milliseconds < 0) return "Not recorded";
+  if (milliseconds < 1000) return `${Math.round(milliseconds)} ms`;
+  const seconds = Math.round(milliseconds / 1000);
+  if (seconds < 60) return `${seconds} s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  const hours = Math.floor(seconds / 3600);
+  return `${hours}h ${Math.floor((seconds % 3600) / 60)}m ${seconds % 60}s`;
+}
+
+function timeLabel(milliseconds) {
+  return milliseconds == null ? "Not recorded" : new Date(milliseconds).toLocaleString();
+}
+
+function timingBox(session) {
+  const timing = session.timing;
+  if (!timing?.attribution) return "";
+  const runs = timing.sambanova_runs;
+  const attribution = timing.attribution;
+  const span = timing.axis_end_ms - timing.axis_start_ms;
+  const labels = {claude: "Claude outside SambaNova", sambanova: "SambaNova", unknown: "Unrecorded gap"};
+  const colors = {claude: "claude-time", sambanova: "samba-time", unknown: "unknown-time"};
+  const durations = attribution.duration_ms;
+  const directOnly = Boolean(session.direct_sambanova_events?.length) && !session.events?.length;
+  const visibleLabels = Object.entries(labels).filter(([provider]) =>
+    (provider !== "unknown" || durations.unknown > 0) && (provider !== "claude" || !directOnly));
+  const description = visibleLabels.map(([provider, label]) => `${label}: ${durationText(durations[provider])}`).join(". ");
+  const bars = attribution.segments.map((segment) => {
+    const left = span > 0 ? (segment.start_ms - timing.axis_start_ms) / span * 100 : 0;
+    const width = span > 0 ? segment.duration_ms / span * 100 : 0;
+    const title = `${labels[segment.provider]} · ${durationText(segment.duration_ms)} · ${timeLabel(segment.start_ms)} → ${timeLabel(segment.end_ms)}`;
+    return `<span class="timing-bar ${colors[segment.provider]}" style="left:${left.toFixed(4)}%;width:${width.toFixed(4)}%" title="${escapeHtml(title)}"></span>`;
+  }).join("");
+  return `<section class="session-timing" aria-label="Session timing">
+    <div class="timing-heading"><h3>Session timing</h3><span>${durationText(attribution.has_timing ? span : null)} elapsed · local time</span></div>
+    <div class="timing-legend">
+      ${visibleLabels.map(([provider, label]) =>
+        `<span class="${colors[provider]}"><i class="timing-dot" aria-hidden="true"></i>${label} <b>${durationText(attribution.has_timing ? durations[provider] : null)}</b></span>`).join("")}
+    </div>
+    <div class="timing-track" role="img" aria-label="${escapeHtml(attribution.has_timing ? description : "Timing not recorded")}">
+      ${bars || `<span class="timing-unavailable">${attribution.has_timing ? "0 ms recorded span" : "Timing not recorded"}</span>`}
+    </div>
+    <div class="timing-axis"><small>${escapeHtml(timeLabel(timing.axis_start_ms))}</small><small>${escapeHtml(timeLabel(timing.axis_end_ms))}</small></div>
+    ${runs.map((run, index) => {
+      const status = run.end_kind === "observed" ? "Claude Code · observed transcript span" : run.end_kind === "elapsed" ? "In progress · elapsed so far" : run.end_kind === "last_observed" ? "Incomplete · through last observed event" : "Launch to finish";
+      const toolNote = run.timed_tool_count ? ` · Tool execution: ${durationText(run.tool_duration_ms)} across ${run.timed_tool_count}/${run.tool_count} timed calls (sum; may overlap)` : "";
+      return `<p class="timing-run-note">${escapeHtml(`SambaNova run ${index + 1} · ${run.model} · ${durationText(run.duration_ms)} · ${status}${toolNote}`)}</p>`;
+    }).join("") || '<p class="timing-run-note">No recorded SambaNova run for this session.</p>'}
+    <p class="timing-note">${directOnly ? "Claude Code is using SambaNova models, so the recorded session span is purple. This includes tools and waiting; it is not a measurement of prefill or decoding time." : "Purple takes priority during SambaNova activity; orange is the remaining Claude session time. Overlaps count once. This is time attribution, not proof that Claude was idle; elapsed time includes waiting."}</p>
+  </section>`;
+}
+
 function toolRows(tools = []) {
   return tools.map((tool) => `<li><b>${escapeHtml(tool.name)}</b>
-    <span>${escapeHtml(tool.detail)}</span>${tool.status ? `<small>${escapeHtml(tool.status)}</small>` : ""}</li>`).join("");
+    <span>${escapeHtml(tool.detail)}</span>${tool.status ? `<small>${escapeHtml(tool.status)}${tool.timing?.duration_ms != null ? ` · Tool execution ${durationText(tool.timing.duration_ms)}` : ""}</small>` : ""}</li>`).join("");
 }
 
 function usageText(event) {
@@ -40,7 +92,7 @@ function sambaRequests(runs) {
     ...step,
     model: step.model || run.model,
     rate_fallback: run.rate_fallback,
-    run_label: runs.length > 1 ? `${run.tool || "opencode"} · run ${run.id || "unknown"}` : "",
+    run_label: run.source === "claude-code" ? `Claude Code → SambaNova · ${step.agent || "Claude Code"}` : runs.length > 1 ? `${run.tool || "opencode"} · run ${run.id || "unknown"}` : "",
   }))).sort((left, right) =>
     (Date.parse(right.timestamp) || 0) - (Date.parse(left.timestamp) || 0));
 }
@@ -78,19 +130,29 @@ function renderSessions(sessions, containerId = "sessions") {
     const estimate = session.sambanova_estimate;
     const runs = session.matched_sambanova_runs;
     const sambaEvents = sambaRequests(runs);
-    const models = Object.keys(session.models).join(", ");
+    const models = [...new Set([...Object.keys(session.models), ...runs.map((run) => run.model)])].join(", ");
+    const frameworkEvents = [...session.events, ...(session.direct_sambanova_events || [])];
+    const endpointHosts = [...new Set(frameworkEvents.filter((event) => event.provider_basis === "session-endpoint").map((event) => event.endpoint_host))];
+    const inferred = frameworkEvents.some((event) => event.provider_basis === "model-fallback");
+    const providerNote = [endpointHosts.length ? `Provider from recorded endpoint: ${endpointHosts.join(", ")}` : "",
+      inferred ? "Older requests without endpoint records use model-based inference" : ""].filter(Boolean).join(" · ");
+    const directRuns = runs.filter((run) => run.source === "claude-code");
+    const offloadCount = runs.length - directRuns.length;
+    const sambaSource = [directRuns.length ? "via Claude Code" : "", offloadCount ? `${offloadCount} tool ${offloadCount === 1 ? "run" : "runs"}` : ""].filter(Boolean).join(" · ");
     const hasEstimate = estimate.eligible && estimate.request_count > 0;
     const comparison = session.cost_comparison;
     return `<article class="session">
       <div class="session-top"><div><strong>${escapeHtml(session.id)}</strong><small>${escapeHtml(session.cwd || "unknown cwd")}</small></div>
         <div class="right"><b>${ints(session.claude.total + samba.total)} recorded tokens</b><small>${escapeHtml(models)}</small></div></div>
+      ${providerNote ? `<p class="step-note">${escapeHtml(providerNote)}</p>` : ""}
       <div class="session-cost-grid">
         <div><span class="provider-label"><img src="/static/claude-icon.png" alt="" width="18" height="18">Claude recorded usage cost</span><strong>${money(session.claude_cost)}</strong><small>${ints(session.claude.total)} tokens · ${session.events.length} requests</small></div>
-        <div><span class="provider-label"><img src="/static/sambanova-icon.png" alt="" width="18" height="18">SambaNova recorded usage cost</span><strong>${money(samba.cost)}</strong><small>${ints(samba.total)} tokens · ${sambaEvents.length} recorded requests · ${runs.length} ${runs.length === 1 ? "run" : "runs"}</small></div>
+        <div><span class="provider-label"><img src="/static/sambanova-icon.png" alt="" width="18" height="18">SambaNova recorded usage cost</span><strong>${money(samba.cost)}</strong><small>${ints(samba.total)} tokens · ${sambaEvents.length} recorded requests${sambaSource ? ` · ${sambaSource}` : ""}</small></div>
         <div><span class="provider-label"><img src="/static/claude-icon.png" alt="" width="18" height="18"><img src="/static/sambanova-icon.png" alt="" width="18" height="18">Combined recorded usage cost</span><strong>${money(session.hybrid_cost)}</strong><small>Claude + SambaNova</small></div>
         <div class="all-claude-card"><span class="provider-label"><img src="/static/claude-icon.png" alt="" width="18" height="18">If all usage ran on Claude</span><strong>${money(comparison.all_claude_cost)}</strong><small>Estimated · ${escapeHtml(comparison.model)}</small></div>
       </div>
       ${comparisonSummary(comparison)}
+      ${timingBox(session)}
       <div class="session-meta"><span>Claude fresh in ${ints(session.claude.input)}</span><span>Out ${ints(session.claude.output)}</span><span>Cache read ${ints(session.claude.cache_read)}</span><span>Cache write ${ints(session.claude.cache_creation)}</span></div>
       <div class="session-meta"><span>SN fresh in ${ints(samba.input)}</span><span>Out ${ints(samba.output)}</span><span>Cache read ${ints(samba.cache_read)}</span><span>Cache write ${ints(samba.cache_creation)}</span></div>
       ${hasEstimate ? `<div class="estimate-box"><div><b>SambaNova estimate · ${escapeHtml(estimate.model)}</b><span class="estimate-tag">Hypothetical</span></div>
@@ -99,7 +161,7 @@ function renderSessions(sessions, containerId = "sessions") {
         <small>Projected total replaces eligible Claude requests with the no-cache estimate. Estimated difference: ${money(Math.abs(estimate.savings))} (${estimate.savings >= 0 ? "lower" : "higher"} cost).</small></div>` : ""}
       <div class="runs-grid"><div class="runs-col"><h3>${runs.length ? `SambaNova activity · ${sambaEvents.length} requests` : "SambaNova estimated coding activity"}</h3>
         ${runs.length ? `<div class="activity-list" data-scroll="samba-${escapeHtml(containerId)}-${escapeHtml(session.id)}">${sambaEvents.map((event) => eventRow(event, "sambanova")).join("")}${unavailableRunRows(runs)}</div>` : hasEstimate ? `<div class="activity-list" data-scroll="est-${escapeHtml(session.id)}">${[...estimate.events].reverse().map((event) => eventRow(event, "sambanova", true)).join("")}</div>` : '<p class="empty">No recorded SambaNova run or eligible coding-tool request in this session.</p>'}</div>
-        <div class="runs-col"><h3>Claude Code activity · ${session.events.length} requests</h3><div class="activity-list" data-scroll="claude-${escapeHtml(session.id)}">${[...session.events].reverse().map((event) => eventRow(event, "claude")).join("") || '<p class="empty">No Claude requests.</p>'}</div></div>
+        <div class="runs-col"><h3>Claude model activity · ${session.events.length} requests</h3><div class="activity-list" data-scroll="claude-${escapeHtml(session.id)}">${[...session.events].reverse().map((event) => eventRow(event, "claude")).join("") || '<p class="empty">No Claude model requests.</p>'}</div></div>
     </article>`;
   }).join("");
   container.querySelectorAll("[data-scroll]").forEach((el) => { el.scrollTop = scrollPositions.get(el.dataset.scroll) || 0; });

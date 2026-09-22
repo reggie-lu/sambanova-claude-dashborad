@@ -323,3 +323,26 @@ th, td { text-align: left; padding: 9px; border-bottom: 1px solid var(--line); w
 .provider-label { flex-wrap: wrap; }
 
 .unavailable-run { padding: 12px; border: 1px dashed var(--line); border-radius: 8px; margin: 8px 0; }
+
+.session-timing { margin: 14px 0; padding: 16px; background: #fff; border: 1px solid var(--line); border-radius: 8px; }
+.timing-heading { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+.timing-heading h3 { margin: 0; font-size: 14px; }
+.timing-heading > span { color: var(--muted); font-size: 11px; }
+.claude-time { color: #a84b0b; }
+.samba-time { color: #713baa; }
+.unknown-time { color: var(--muted); }
+.timing-track { height: 24px; position: relative; background: #f1f3f7; border-radius: 5px; overflow: hidden; }
+.timing-bar { position: absolute; top: 0; bottom: 0; }
+.timing-bar.claude-time, .claude-time .timing-dot { background: #eb8a36; }
+.timing-bar.samba-time, .samba-time .timing-dot { background: #9356c8; }
+.timing-bar.unknown-time, .unknown-time .timing-dot { background: #c2c9d2; }
+.timing-legend { display: flex; gap: 10px 20px; flex-wrap: wrap; margin-bottom: 10px; font-size: 12px; }
+.timing-legend > span { display: flex; gap: 6px; align-items: center; }
+.timing-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
+.timing-axis { display: flex; justify-content: space-between; gap: 12px; margin: 5px 0 10px; }
+.timing-axis small { font-size: 11px; }
+.timing-axis small:last-child { text-align: right; }
+.timing-run-note { font-size: 11px; line-height: 1.5; color: var(--muted); margin: 6px 0; }
+.timing-unavailable { font-size: 11px; color: var(--muted); padding: 0 6px; }
+.timing-note { font-size: 11px; line-height: 1.5; color: var(--muted); margin: 10px 0 0; }
+@media (max-width: 560px) { .session-timing { padding: 12px; } }

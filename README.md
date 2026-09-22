@@ -1,6 +1,7 @@
 # SambaNova Cost Lens
 
-Small Flask dashboard for comparing Claude Code orchestration against SambaNova coding-tool offload.
+Small Flask dashboard for comparing Claude model usage, SambaNova coding-tool offload,
+and Claude Code running directly on SambaNova models.
 
 ## Run
 
@@ -13,7 +14,7 @@ Open <http://127.0.0.1:5055>.
 
 The dashboard polls:
 
-- `~/.claude/projects/**/*.jsonl` for Claude Code sessions and exact Claude token usage.
+- `~/.claude/projects/**/*.jsonl` for Claude Code sessions and recorded model token usage.
 - `data/sambanova_runs.jsonl` for tracked SambaNova runs.
 
 The installed `samba-claude` plugin entrypoint has also been instrumented locally, so normal Claude CLI use of the SambaNova `/code` tool writes to the same `data/sambanova_runs.jsonl` file automatically.
@@ -35,6 +36,66 @@ python scripts/run_samba_tracked.py opencode MiniMax-M2.7 /Users/bowenl/work/sam
 ```
 
 The wrapper invokes the installed `samba-claude` plugin script, captures stdout/stderr, parses token usage when the tool prints it, and appends a JSONL record. If usage is not printed, it marks the run as estimated.
+
+## Claude Code with a SambaNova model
+
+Sessions run with `ANTHROPIC_BASE_URL=https://api.sambanova.ai` and
+`ANTHROPIC_MODEL=MiniMax-M3` are read directly from Claude Code's normal JSONL logs.
+No `/code` invocation or extra tracking wrapper is required. The dashboard identifies
+the provider from the endpoint recorded inside the Claude Code session, before
+considering the model name:
+
+- `ANTHROPIC_BASE_URL` with hostname `sambanova.ai` or a subdomain: all model
+  requests, including subagents and custom model aliases, count as SambaNova usage.
+- An unset or other endpoint: model requests count on the Claude side. Actual
+  SambaNova `/code` runs remain separate SambaNova coding-tool usage.
+- Older requests with no endpoint record retain model-based inference, labeled in
+  the session card. The dashboard's own environment never relabels historical usage.
+
+Install the lightweight endpoint recorder into your Claude Code user settings:
+
+```bash
+.venv/bin/python provider_tracking.py --install
+```
+
+This adds `SessionStart` and `UserPromptSubmit` command hooks, preserving existing
+hooks/settings and saving a timestamped settings backup. Start or resume Claude Code
+after installation to ensure the hooks are loaded. The recorder checks the environment
+of that Claude Code process, so exports in a separate terminal work without restarting
+the dashboard. It records only session ID, observation time, hook event, provider,
+and endpoint hostname in `data/claude_providers.jsonl`; no API keys, prompts, URL
+credentials, paths, or query parameters are saved. Endpoint observations are applied
+only to subsequent requests in that session, including its subagents. Resuming with
+a different endpoint preserves the provider of previously recorded requests.
+
+Unknown model aliases are still counted when the endpoint is known; their costs
+use visibly labeled fallback rates until the model is added to `rates.json`.
+For local gateways, the hostname must identify SambaNova for automatic SambaNova
+attribution. Other gateways use the Claude-side convention above.
+
+The backend reads `CLAUDE_PROVIDER_LOG` to override the metadata path. For that setup,
+install with `provider_tracking.py --install --output /path/to/claude_providers.jsonl`
+so the hook and dashboard use the same file. Hooks are documented in the
+[Claude Code hooks reference](https://code.claude.com/docs/en/hooks).
+
+Main-agent and subagent requests appear under **SambaNova activity**, labeled
+**Claude Code → SambaNova**. Streaming fragments with one message ID count once,
+using the latest usage snapshot and merging tool calls. Direct usage contributes
+to SambaNova totals and the all-Claude comparison, never to recorded Claude cost.
+The raw usage remains available on each request in the API response.
+
+SambaNova's [Messages usage schema](https://github.com/sambanova/sambanova-python/blob/main/src/sambanova/types/message_create_response.py)
+defines `input_tokens` as the total prompt, so cache reads and writes are separated
+from that total rather than added again. Output is used as reported, without adding
+thinking tokens a second time. This differs from native Claude's additive input
+categories and from the existing OpenCode step format.
+
+A SambaNova-only session has a purple-only bar. Direct-model timing uses observed
+transcript spans; it is not prefill, decoding, or request latency. Consecutive requests
+are grouped by model within each agent; main-agent model switches split spans at the
+first logged response for the new model. Subagent spans use their first and last
+recorded responses. Purple retains priority when spans overlap. These observations
+do not establish exact provider switch times or whether a session is still running.
 
 ## Manual ingest
 
@@ -113,3 +174,25 @@ changing the recent list or the global totals. A missing ID sets
 The Claude icon in the cost cards is served locally from `static/claude-icon.png`,
 obtained from the official claude.com favicon:
 https://assets.claude.com/95a868946ac8a31e5ff832e2899f294aa368b836.png?w=32&h=32
+
+## Session timing
+
+Each session shows one combined timeline. Purple covers the union of SambaNova
+`/code` run spans; orange covers the remaining Claude session span (first to last
+logged event). Purple takes priority during overlap, so every instant is attributed
+only once, including overlapping SambaNova runs. Gray marks gaps outside recorded
+intervals. The legend shows these non-overlapping attributed durations, while run
+notes retain each run's full elapsed duration.
+
+This attribution rule does not prove that Claude was idle during offload; both
+providers may have activity during the same period. Spans include waiting and idle
+gaps. Finished runs use launch-to-finish time, active runs use elapsed time so far,
+and stale/missing-finish runs use the last observed event and are labeled incomplete.
+Unknown durations remain unavailable rather than zero. The bar includes runs that
+extend beyond the last Claude event.
+
+SambaNova tool `state.time.start/end` values also provide execution durations.
+The purple row shows cumulative tool execution and timing coverage; each tool in
+the activity list shows its own duration. These sums may include overlapping calls.
+Neither session spans nor `/code` response spans represent prefill, decoding, or
+exclusive model computation time.

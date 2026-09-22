@@ -65,15 +65,62 @@ test('saved-session selection survives refresh, clears, and handles missing logs
     {id: 'run-c', model: 'MiniMax-M2.7', tool: 'opencode', status: 'finished',
       cost: 1, tokens: 100, steps: []},
   ];
+  sessions[0].timing = {
+    axis_start_ms: 1000, axis_end_ms: 5000,
+    attribution: {has_timing: true, duration_ms: {claude: 1000, sambanova: 3000, unknown: 0},
+      segments: [{provider: 'claude', start_ms: 1000, end_ms: 2000, duration_ms: 1000},
+                 {provider: 'sambanova', start_ms: 2000, end_ms: 5000, duration_ms: 3000}]},
+    claude: {start_ms: 1000, end_ms: 4000, duration_ms: 3000},
+    sambanova_runs: [{start_ms: 2000, end_ms: 5000, duration_ms: 3000,
+      model: 'MiniMax-M2.7', end_kind: 'finished', timed_tool_count: 1,
+      tool_count: 2, tool_duration_ms: 250}],
+  };
   await vm.runInContext('refresh()', context);
   const activity = element('sessions').innerHTML;
   assert(activity.includes('SambaNova activity · 3 requests'));
+  assert(activity.includes('Claude outside SambaNova'));
+  assert(activity.includes('SambaNova run 1'));
+  assert(activity.includes('timing-bar claude-time'));
+  assert(activity.includes('timing-bar samba-time'));
+  assert.equal((activity.match(/class="timing-track"/g) || []).length, 1);
+  assert(activity.includes('left:25.0000%;width:75.0000%'));
+  assert(activity.includes('250 ms across 1/2 timed calls'));
+  assert(!activity.includes('NaN'));
+  const zeroTiming = vm.runInContext('timingBox({timing: {axis_start_ms: 0, axis_end_ms: 0, attribution: {has_timing: true, duration_ms: {claude: 0, sambanova: 0, unknown: 0}, segments: []}, claude: {start_ms: 0, end_ms: 0, duration_ms: 0}, sambanova_runs: []}})', context);
+  assert(zeroTiming.includes('0 ms'));
+  assert(zeroTiming.includes('No recorded SambaNova run'));
+  assert(!zeroTiming.includes('NaN'));
+  assert(!zeroTiming.includes('Infinity'));
   assert.equal((activity.match(/class="activity-step"/g) || []).length, 3);
   assert(activity.indexOf('pending-request') < activity.indexOf('new-request'));
   assert(activity.indexOf('new-request') < activity.indexOf('old-request'));
   assert(activity.includes('Usage pending'));
   assert(activity.includes('Request details unavailable for this run'));
   assert(!activity.includes('<details'));
+  // The framework name does not assign direct M3 traffic to Claude's provider lane.
+  const direct = sessions[1];
+  direct.models = {};
+  direct.direct_sambanova_events = [step('direct-m3', '2026-09-22T12:00:00Z', {})];
+  direct.matched_sambanova_runs = [{id: 'direct', source: 'claude-code',
+    tool: 'Claude Code', model: 'MiniMax-M3', steps: direct.direct_sambanova_events}];
+  direct.direct_sambanova_events[0].model = 'MiniMax-M3';
+  direct.timing = {
+    axis_start_ms: 1000, axis_end_ms: 5000,
+    attribution: {has_timing: true, duration_ms: {claude: 0, sambanova: 4000, unknown: 0},
+      segments: [{provider: 'sambanova', start_ms: 1000, end_ms: 5000, duration_ms: 4000}]},
+    sambanova_runs: [{model: 'MiniMax-M3', end_kind: 'observed', duration_ms: 4000}],
+  };
+  context.directFixture = direct;
+  vm.runInContext('renderSessions([directFixture], "selectedSession")', context);
+  const directHtml = element('selectedSession').innerHTML;
+  assert(directHtml.includes('MiniMax-M3'));
+  assert(directHtml.includes('SambaNova activity · 1 requests'));
+  assert(directHtml.includes('Claude Code → SambaNova'));
+  assert(directHtml.includes('observed transcript span'));
+  assert(directHtml.includes('timing-bar samba-time'));
+  assert(!directHtml.includes('claude-time'));
+  assert(!directHtml.includes('Usage pending'));
+  assert(directHtml.includes('Claude model activity · 0 requests'));
   element('sessionPicker').handlers.change({target: {value: 'session-27'}});
   await tick();
   assert(requests.at(-1).includes('session_id=session-27'));

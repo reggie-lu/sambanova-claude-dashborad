@@ -7,6 +7,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from timing import timing_interval
+from provider_tracking import observed_provider
+
 
 def read_records(path: Path) -> list[dict[str, Any]]:
     """Read JSONL, tolerating incomplete writes and non-JSON log lines."""
@@ -51,22 +54,37 @@ def coding_tool(name: str, inputs: dict[str, Any]) -> bool:
     ))
 
 
-def claude_requests(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def claude_requests(
+    records: list[dict[str, Any]], sambanova_models: set[str] | None = None,
+    provider_history: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     """Merge content fragments by API message ID; usage is a snapshot, not a delta."""
     requests: dict[str, dict[str, Any]] = {}
     for index, record in enumerate(records):
         message = record.get("message")
-        if not isinstance(message, dict) or not str(message.get("model", "")).startswith("claude"):
+        if not isinstance(message, dict):
+            continue
+        model = str(message.get("model", ""))
+        if not model or model.startswith("<"):
+            continue
+        endpoint = observed_provider(record.get("timestamp"), provider_history or [])
+        provider = endpoint.get("provider") or ("claude" if model == "claude" or model.startswith("claude-") else (
+            "sambanova" if model in (sambanova_models or set()) else None
+        ))
+        if provider is None or message.get("role", "assistant") != "assistant":
             continue
         key = message.get("id") or record.get("uuid") or f"line-{index}"
         item = requests.setdefault(key, {
-            "id": key, "model": message["model"], "timestamp": record.get("timestamp"),
+            "id": key, "model": model, "provider": provider,
+            "provider_basis": "model-fallback", **endpoint,
+            "framework": "Claude Code", "timestamp": record.get("timestamp"),
             "agent": record.get("attributionAgent") or record.get("agentId") or "Claude Code",
             "usage": {}, "tools": {},
         })
         # Later fragments may contain updated output-token totals.
         if message.get("usage"):
             item["usage"] = message["usage"]
+        item["last_observed_at"] = record.get("timestamp")
         content = message.get("content")
         for block in content if isinstance(content, list) else []:
             if not isinstance(block, dict) or block.get("type") != "tool_use":
@@ -120,10 +138,15 @@ def opencode_steps(run: dict[str, Any]) -> list[dict[str, Any]]:
                 "id": tool_id, "name": name,
                 "detail": tool_detail(name, state.get("input") or {}),
                 "status": state.get("status", "running"),
+                "timing": timing_interval(
+                    (state.get("time") or {}).get("start"),
+                    (state.get("time") or {}).get("end"),
+                ),
             }
         if kind == "step_finish":
             tokens = part.get("tokens")
             step["status"] = "completed"
+            step["finished_at"] = event_time(record.get("timestamp"))
             if isinstance(tokens, dict):
                 cache = tokens.get("cache") or {}
                 step["usage"] = {

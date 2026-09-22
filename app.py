@@ -10,6 +10,8 @@ from typing import Any
 from flask import Flask, jsonify, render_template, request
 
 from activity import claude_requests, opencode_steps, read_records
+from timing import session_timing
+from provider_tracking import PROVIDER_LOG, load_provider_history
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -41,18 +43,6 @@ def iso_to_epoch(value: str | None) -> float:
         return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
     except ValueError:
         return 0.0
-
-
-def is_claude_model(model: str | None) -> bool:
-    """True only for genuine Claude Code models.
-
-    Transcripts also carry assistant events whose `model` is the SambaNova
-    coding model (e.g. MiniMax-M2.7) when `/code` is used, plus `<synthetic>`
-    placeholder events. Those must not be counted on the Claude side.
-    """
-    if not model:
-        return False
-    return model == "claude" or model.startswith("claude-")
 
 
 def normalize_claude_model(model: str | None) -> str:
@@ -160,6 +150,7 @@ def content_text(content: Any) -> str:
 
 
 def scan_claude_sessions() -> list[dict[str, Any]]:
+    provider_history = load_provider_history(PROVIDER_LOG)
     sessions: dict[str, dict[str, Any]] = {}
     records_by_session: defaultdict[str, list] = defaultdict(list)
     for path in CLAUDE_PROJECTS_DIR.rglob("*.jsonl"):
@@ -170,7 +161,7 @@ def scan_claude_sessions() -> list[dict[str, Any]]:
             "id": session_id, "cwd": "", "started_at": "", "updated_at": "",
             "claude": empty_tokens(), "claude_cost": 0.0,
             "models": defaultdict(int), "agents": defaultdict(empty_tokens),
-            "sambanova_mentions": [], "events": [],
+            "sambanova_mentions": [], "events": [], "direct_sambanova_events": [],
         }
         for record in records:
             timestamp = record.get("timestamp")
@@ -187,7 +178,23 @@ def scan_claude_sessions() -> list[dict[str, Any]]:
             text = content_text(message.get("content"))
             if any(marker in text for marker in ("samba-claude", "/code", "opencode")):
                 session["sambanova_mentions"].append({"timestamp": timestamp})
-        for item in claude_requests(records):
+        for item in claude_requests(records, set(RATES.get("sambanova", {})) - {"_default"},
+                                   provider_history.get(session_id, [])):
+            if item["provider"] == "sambanova":
+                usage = item["usage"]
+                cached = int(usage.get("cache_read_input_tokens") or 0)
+                written = int(usage.get("cache_creation_input_tokens") or 0)
+                event = {
+                    **item,
+                    # SambaNova Messages reports total prompt input, including cache.
+                    # Keep the raw wire usage above; normalize to additive categories.
+                    "input_tokens": max(0, int(usage.get("input_tokens") or 0) - cached - written),
+                    "output_tokens": int(usage.get("output_tokens") or 0),
+                    "cache_read_tokens": cached, "cache_write_tokens": written,
+                }
+                event["cost"] = sambanova_run_cost(event)
+                session["direct_sambanova_events"].append(event)
+                continue
             usage = item.pop("usage")
             model = normalize_claude_model(item["model"])
             cost = claude_usage_cost(model, usage)
@@ -212,6 +219,55 @@ def scan_claude_sessions() -> list[dict[str, Any]]:
         session["agents"] = dict(session["agents"])
         sessions[session_id] = session
     return sorted(sessions.values(), key=lambda item: iso_to_epoch(item.get("updated_at")), reverse=True)
+
+
+def direct_sambanova_runs(sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Adapt SambaNova-backed Claude Code activity to the common run representation.
+
+    Group consecutive requests by model within each agent. Timestamps describe
+    observed transcript spans, not API request start/end or inference latency.
+    """
+    runs = []
+    for session in sessions:
+        agents: defaultdict[str, list] = defaultdict(list)
+        for event in session["events"] + session.get("direct_sambanova_events", []):
+            agents[event["agent"]].append(event)
+        for agent, events in agents.items():
+            events.sort(key=lambda event: iso_to_epoch(event.get("timestamp")))
+            groups = []
+            for event in events:
+                if not groups or any(groups[-1][-1][key] != event[key]
+                                     for key in ("model", "provider")):
+                    groups.append([])
+                groups[-1].append(event)
+            for index, steps in enumerate(groups):
+                if steps[0]["provider"] != "sambanova":
+                    continue
+                start = steps[0].get("timestamp")
+                end = steps[-1].get("last_observed_at") or steps[-1].get("timestamp")
+                if agent == "Claude Code":
+                    if index == 0:
+                        start = session["started_at"] or start
+                    end = (groups[index + 1][0].get("timestamp") if index + 1 < len(groups)
+                           else session["updated_at"]) or end
+                model = steps[0]["model"]
+                run = {
+                    "id": f"claude-code:{session['id']}:{agent}:{index}",
+                    "claude_session_id": session["id"], "cwd": session["cwd"],
+                    "source": "claude-code", "tool": "Claude Code", "model": model,
+                    "status": "observed", "started_at": start, "observed_until": end,
+                    "steps": steps, "tool_count": sum(len(step["tools"]) for step in steps),
+                    "detail_status": "available", "estimated": False,
+                    "rate_fallback": model not in RATES.get("sambanova", {}),
+                    "rates": rate_for("sambanova", model),
+                    "cost": sum(step["cost"] for step in steps),
+                }
+                for key in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"):
+                    run[key] = sum(step[key] for step in steps)
+                run["token_breakdown"] = sambanova_tokens(run)
+                run["total_tokens"] = run["token_breakdown"]["total"]
+                runs.append(run)
+    return runs
 
 
 def scan_sambanova_runs() -> list[dict[str, Any]]:
@@ -347,9 +403,14 @@ def summarize(
     estimate_model: str = "MiniMax-M2.7", selected_session_id: str | None = None
 ) -> dict[str, Any]:
     claude_sessions = scan_claude_sessions()
-    samba_runs = scan_sambanova_runs()
+    samba_runs = scan_sambanova_runs() + direct_sambanova_runs(claude_sessions)
+    samba_runs.sort(key=lambda run: iso_to_epoch(
+        run.get("observed_until") or run.get("finished_at") or run.get("started_at")
+    ), reverse=True)
     attach_sambanova_runs_to_sessions(claude_sessions, samba_runs)
+    now_ms = datetime.now(timezone.utc).timestamp() * 1000
     for session in claude_sessions:
+        session["timing"] = session_timing(session, now_ms)
         session["sambanova_estimate"] = estimate_coding(session, estimate_model)
 
     claude_tokens = empty_tokens()
@@ -400,6 +461,7 @@ def summarize(
             "claude_projects_dir": str(CLAUDE_PROJECTS_DIR),
             "sambanova_runs_path": str(SAMBANOVA_RUNS_PATH),
             "rates_path": str(RATES_PATH),
+            "claude_provider_log": str(PROVIDER_LOG),
         },
         "estimation": {
             "model": estimate_model,
@@ -453,6 +515,8 @@ def attach_sambanova_runs_to_sessions(
             "model": run.get("model") or "unknown",
             "started_at": run.get("started_at"),
             "finished_at": run.get("finished_at"),
+            "observed_until": run.get("observed_until"),
+            "source": run.get("source", "tracked-run"),
             "tokens": int(run.get("total_tokens") or 0),
             "input_tokens": int(run.get("input_tokens") or 0),
             "output_tokens": int(run.get("output_tokens") or 0),
@@ -545,7 +609,7 @@ def build_timeline(
 
     for run in samba_runs:
         start = run.get("started_at") or run.get("finished_at")
-        end = run.get("finished_at") or start
+        end = run.get("finished_at") or run.get("observed_until") or start
         if not start:
             continue
         tokens = run["token_breakdown"]
@@ -554,7 +618,7 @@ def build_timeline(
             {
                 "id": run.get("id") or f"samba:{start}",
                 "provider": "sambanova",
-                "lane": "SambaNova Coding Tool",
+                "lane": "SambaNova via Claude Code" if run.get("source") == "claude-code" else "SambaNova Coding Tool",
                 "label": run.get("tool") or "opencode",
                 "model": run.get("model") or "unknown",
                 "session": run.get("session") or "",
