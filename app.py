@@ -343,7 +343,9 @@ def session_cost_comparison(session: dict[str, Any], fallback_model: str) -> dic
     }
 
 
-def summarize(estimate_model: str = "MiniMax-M2.7") -> dict[str, Any]:
+def summarize(
+    estimate_model: str = "MiniMax-M2.7", selected_session_id: str | None = None
+) -> dict[str, Any]:
     claude_sessions = scan_claude_sessions()
     samba_runs = scan_sambanova_runs()
     attach_sambanova_runs_to_sessions(claude_sessions, samba_runs)
@@ -389,6 +391,8 @@ def summarize(estimate_model: str = "MiniMax-M2.7") -> dict[str, Any]:
     savings = all_claude_cost - hybrid_cost
     savings_pct = (savings / all_claude_cost * 100) if all_claude_cost > 0 else 0.0
     timeline = build_timeline(claude_sessions, samba_runs, dominant_claude_model)
+    saved_sessions = [s for s in claude_sessions if s["events"] or s["matched_sambanova_runs"]]
+    selected_session = next((s for s in saved_sessions if s["id"] == selected_session_id), None)
 
     return {
         "updated_at": datetime.now(timezone.utc).isoformat(),
@@ -416,7 +420,13 @@ def summarize(estimate_model: str = "MiniMax-M2.7") -> dict[str, Any]:
             "dominant_claude_model": dominant_claude_model,
             "comparison_models": sorted({run["comparison_model"] for run in samba_runs}),
         },
-        "sessions": [s for s in claude_sessions if s["events"] or s["matched_sambanova_runs"]][:25],
+        "sessions": saved_sessions[:10],
+        "session_index": [
+            {key: session[key] for key in ("id", "cwd", "updated_at")}
+            for session in saved_sessions
+        ],
+        "selected_session": selected_session,
+        "selected_session_missing": bool(selected_session_id and selected_session is None),
         "sambanova_runs": samba_runs[:50],
         "timeline": timeline,
         "rates": RATES,
@@ -572,7 +582,7 @@ def metrics():
     model = request.args.get("estimate_model", "MiniMax-M2.7")
     if model.startswith("_") or model not in RATES.get("sambanova", {}):
         return jsonify({"error": "Unknown SambaNova estimate model"}), 400
-    return jsonify(summarize(model))
+    return jsonify(summarize(model, request.args.get("session_id")))
 
 
 @app.post("/api/sambanova-runs")

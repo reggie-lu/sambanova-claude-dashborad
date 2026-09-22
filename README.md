@@ -52,16 +52,18 @@ Rates live in `rates.json` as USD per 1M input/output tokens. Claude defaults us
 
 ## Activity and estimates
 
-- SambaNova runs expand into model steps and individual tool calls from the tracked
-  `log_path` (OpenCode JSONL). Token usage and cost belong to the model step; multiple
-  tools share that request. Missing historical logs show aggregate usage only.
+- SambaNova model requests appear directly in the activity column, newest first,
+  matching Claude's request list. Requests from all matched runs are combined;
+  each shows model, time, tokens, cost, and tool calls from the tracked `log_path`
+  (OpenCode JSONL). Multiple tools share a request's cost. Missing detailed logs
+  show a separate aggregate-only notice and are excluded from request counts.
 - Claude transcript fragments with the same API message ID are merged before counting
   usage. Input, output, cache reads, and cache writes are shown separately.
 - Claude-only sessions get a SambaNova estimate for requests containing file tools
   or recognized development shell commands. Delegation and SambaNova launch commands
   are excluded. The entire qualifying request is priced once; other requests stay
   on Claude. This is a heuristic, not a semantic coding classifier.
-- Select the target SambaNova model above the sessions. The no-cache estimate prices
+- Session-level SambaNova estimates use MiniMax-M2.7 by default. The no-cache estimate prices
   all source prompt tokens as fresh input. A second scenario assumes the same cache
   hits; source cache writes use the SambaNova input rate. Actual tokenization, context,
   output, and task quality may differ. Estimates never increase recorded token totals.
@@ -93,3 +95,21 @@ models, with the overall model used only for unmatched runs.
 
 The local `static/sambanova-icon.png` is the official icon downloaded from
 https://sambanova.ai/hubfs/sambanova-favicon.png, used in the header and browser tab.
+
+## Browsing saved sessions
+
+The dashboard shows the latest 10 sessions with recorded usage. Below them,
+**Browse saved sessions** lists every available session by date, folder, and ID,
+including sessions older than the first 10. Selecting one displays its complete
+cost and activity cards below the picker; automatic refresh preserves the selection.
+Choose the placeholder to clear it. Sessions are read from the existing local logs,
+not deleted when they leave the latest 10.
+
+`GET /api/metrics` returns 10 recent sessions plus a lightweight `session_index`.
+`GET /api/metrics?session_id=<id>` additionally returns the selected session, without
+changing the recent list or the global totals. A missing ID sets
+`selected_session_missing` and returns no selected session.
+
+The Claude icon in the cost cards is served locally from `static/claude-icon.png`,
+obtained from the official claude.com favicon:
+https://assets.claude.com/95a868946ac8a31e5ff832e2899f294aa368b836.png?w=32&h=32

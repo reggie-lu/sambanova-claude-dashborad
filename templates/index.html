@@ -45,19 +45,19 @@
         </article>
       </section>
 
-      <section class="panel estimate-panel">
-        <div class="panel-head"><h2>SambaNova estimation</h2><label for="estimateModel">Coding model <select id="estimateModel" aria-label="SambaNova estimation model"></select></label></div>
-        <p id="estimateSummary" class="subtle">Calculating…</p>
-        <p class="method-note">For Claude-only sessions, identify requests containing file read, search, edit, write, or development shell tools. Price the whole request once, even when it calls several tools. Other requests stay on Claude. This heuristic can include non-coding file work and miss coding done without tools.</p>
-        <p class="method-note">Estimates reuse Claude token counts; model tokenization, context, output, and task quality can differ. “No cache reuse” prices all prompt tokens as fresh input. “With cache reuse” assumes the same cache hits; cache writes use SambaNova input rates. Hypothetical usage is excluded from recorded totals. Costs use standard API token rates, not Claude subscription charges, tool fees, or account discounts.</p>
-      </section>
-
       <section class="panel">
         <div class="panel-head">
           <h2>Claude Sessions</h2>
-          <span id="sessionCount">recent sessions</span>
+          <span id="sessionCount">Latest 10 sessions</span>
         </div>
         <div id="sessions" class="sessions"></div>
+        <div class="session-browser">
+          <h3>Browse saved sessions</h3>
+          <label for="sessionPicker">Choose a session from your logs</label>
+          <select id="sessionPicker"><option value="">Choose a saved session…</option></select>
+          <p id="sessionPickerStatus" class="subtle" role="status">Loading saved sessions…</p>
+          <div id="selectedSession" class="sessions"></div>
+        </div>
       </section>
 
       <section class="panel">

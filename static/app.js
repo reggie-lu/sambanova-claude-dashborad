@@ -4,9 +4,8 @@ const setText = (id, value) => { document.getElementById(id).textContent = value
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;",
 }[char]));
-let selectedModel = "MiniMax-M2.7";
-const openDetails = new Set();
-const seenRuns = new Set();
+let selectedSessionId = "";
+let sessionIndexSignature = "";
 const scrollPositions = new Map();
 
 function toolRows(tools = []) {
@@ -31,22 +30,28 @@ function eventRow(event, provider, estimate = false) {
       <b>${measured ? money(event.cost) : "Usage pending"}</b></div>
     <small>${measured ? usageText(event) : "Waiting for model-step usage"}${event.rate_fallback ? " · Fallback rate" : ""}</small>
     ${event.tools?.length ? `<ul class="tool-list">${toolRows(event.tools)}</ul>` : '<p class="step-note">Model response · no tool call</p>'}
+    ${event.run_label ? `<small>${escapeHtml(event.run_label)}</small>` : ""}
     ${estimate ? `<small>Claude request: ${money(event.claude_cost)} · With cache reuse: ${money(event.cache_reuse_cost)}</small>` : ""}
   </div>`;
 }
 
-function runRows(runs) {
-  return runs.map((run) => {
-    const key = `run-${run.id}`;
-    if (!seenRuns.has(key)) { openDetails.add(key); seenRuns.add(key); }
-    return `<details class="run-detail" data-key="${escapeHtml(key)}" ${openDetails.has(key) ? "open" : ""}>
-      <summary><span class="pill samba-pill">sambanova</span> ${escapeHtml(run.tool)} · ${escapeHtml(run.status)}
-        <strong>${money(run.cost)}${run.estimated ? " (estimated tokens)" : ""}</strong>
-        <small>${escapeHtml(run.model)} · ${ints(run.tokens)} tokens · ${run.steps.length} model steps · ${run.tool_count} tool calls${run.rate_fallback ? " · Fallback rate" : ""}</small></summary>
-      <p class="step-note">${usageText(run)}. Costs are per model step; tool calls share that request.</p>
-      <div class="activity-list" data-scroll="${escapeHtml(key)}">${run.steps.length ? run.steps.map((step) => eventRow(step, "sambanova")).join("") : '<p class="empty">Detailed log unavailable. This run has aggregate usage only; individual actions cannot be recovered.</p>'}</div>
-    </details>`;
-  }).join("");
+function sambaRequests(runs) {
+  return runs.flatMap((run) => (run.steps || []).map((step) => ({
+    ...step,
+    model: step.model || run.model,
+    rate_fallback: run.rate_fallback,
+    run_label: runs.length > 1 ? `${run.tool || "opencode"} · run ${run.id || "unknown"}` : "",
+  }))).sort((left, right) =>
+    (Date.parse(right.timestamp) || 0) - (Date.parse(left.timestamp) || 0));
+}
+
+function unavailableRunRows(runs) {
+  return runs.filter((run) => !run.steps?.length).map((run) => `
+    <div class="unavailable-run">
+      <strong>${escapeHtml(run.model)} · ${escapeHtml(run.status)} · ${money(run.cost)} total</strong>
+      <p class="step-note">${escapeHtml(run.tool || "opencode")} · ${ints(run.tokens)} tokens${run.estimated ? " (estimated)" : ""} · ${usageText(run)}</p>
+      <p class="step-note">Request details unavailable for this run. Only aggregate usage was recorded or its detailed log is missing.</p>
+    </div>`).join("");
 }
 
 function comparisonSummary(comparison) {
@@ -64,18 +69,15 @@ function comparisonSummary(comparison) {
   </div>`;
 }
 
-function renderSessions(sessions) {
-  const container = document.getElementById("sessions");
-  container.querySelectorAll("details[data-key]").forEach((el) => {
-    if (el.open) openDetails.add(el.dataset.key); else openDetails.delete(el.dataset.key);
-  });
+function renderSessions(sessions, containerId = "sessions") {
+  const container = document.getElementById(containerId);
   container.querySelectorAll("[data-scroll]").forEach((el) => scrollPositions.set(el.dataset.scroll, el.scrollTop));
-  setText("sessionCount", `${sessions.length} recent sessions`);
   if (!sessions.length) { container.innerHTML = '<div class="empty">No Claude sessions found.</div>'; return; }
   container.innerHTML = sessions.map((session) => {
     const samba = session.sambanova;
     const estimate = session.sambanova_estimate;
     const runs = session.matched_sambanova_runs;
+    const sambaEvents = sambaRequests(runs);
     const models = Object.keys(session.models).join(", ");
     const hasEstimate = estimate.eligible && estimate.request_count > 0;
     const comparison = session.cost_comparison;
@@ -83,10 +85,10 @@ function renderSessions(sessions) {
       <div class="session-top"><div><strong>${escapeHtml(session.id)}</strong><small>${escapeHtml(session.cwd || "unknown cwd")}</small></div>
         <div class="right"><b>${ints(session.claude.total + samba.total)} recorded tokens</b><small>${escapeHtml(models)}</small></div></div>
       <div class="session-cost-grid">
-        <div><span>Claude recorded usage cost</span><strong>${money(session.claude_cost)}</strong><small>${ints(session.claude.total)} tokens · ${session.events.length} requests</small></div>
-        <div><span class="provider-label"><img src="/static/sambanova-icon.png" alt="" width="18" height="18">SambaNova recorded usage cost</span><strong>${money(samba.cost)}</strong><small>${ints(samba.total)} tokens · ${runs.length} runs</small></div>
-        <div><span>Combined recorded usage cost</span><strong>${money(session.hybrid_cost)}</strong><small>Claude + SambaNova</small></div>
-        <div class="all-claude-card"><span>If all usage ran on Claude</span><strong>${money(comparison.all_claude_cost)}</strong><small>Estimated · ${escapeHtml(comparison.model)}</small></div>
+        <div><span class="provider-label"><img src="/static/claude-icon.png" alt="" width="18" height="18">Claude recorded usage cost</span><strong>${money(session.claude_cost)}</strong><small>${ints(session.claude.total)} tokens · ${session.events.length} requests</small></div>
+        <div><span class="provider-label"><img src="/static/sambanova-icon.png" alt="" width="18" height="18">SambaNova recorded usage cost</span><strong>${money(samba.cost)}</strong><small>${ints(samba.total)} tokens · ${sambaEvents.length} recorded requests · ${runs.length} ${runs.length === 1 ? "run" : "runs"}</small></div>
+        <div><span class="provider-label"><img src="/static/claude-icon.png" alt="" width="18" height="18"><img src="/static/sambanova-icon.png" alt="" width="18" height="18">Combined recorded usage cost</span><strong>${money(session.hybrid_cost)}</strong><small>Claude + SambaNova</small></div>
+        <div class="all-claude-card"><span class="provider-label"><img src="/static/claude-icon.png" alt="" width="18" height="18">If all usage ran on Claude</span><strong>${money(comparison.all_claude_cost)}</strong><small>Estimated · ${escapeHtml(comparison.model)}</small></div>
       </div>
       ${comparisonSummary(comparison)}
       <div class="session-meta"><span>Claude fresh in ${ints(session.claude.input)}</span><span>Out ${ints(session.claude.output)}</span><span>Cache read ${ints(session.claude.cache_read)}</span><span>Cache write ${ints(session.claude.cache_creation)}</span></div>
@@ -95,8 +97,8 @@ function renderSessions(sessions) {
         <p>${estimate.request_count} coding requests · ${estimate.tool_count} coding tool calls · ${ints(estimate.tokens.total)} source tokens</p>
         <div class="estimate-values"><span>No cache reuse <b>${money(estimate.cost)}</b></span><span>With cache reuse <b>${money(estimate.cache_reuse_cost)}</b></span><span>Same requests on Claude <b>${money(estimate.claude_cost)}</b></span><span>Projected session total <b>${money(estimate.projected_cost)}</b></span></div>
         <small>Projected total replaces eligible Claude requests with the no-cache estimate. Estimated difference: ${money(Math.abs(estimate.savings))} (${estimate.savings >= 0 ? "lower" : "higher"} cost).</small></div>` : ""}
-      <div class="runs-grid"><div class="runs-col"><h3>${runs.length ? "SambaNova activity" : "SambaNova estimated coding activity"}</h3>
-        ${runs.length ? runRows(runs) : hasEstimate ? `<div class="activity-list" data-scroll="est-${escapeHtml(session.id)}">${[...estimate.events].reverse().map((event) => eventRow(event, "sambanova", true)).join("")}</div>` : '<p class="empty">No recorded SambaNova run or eligible coding-tool request in this session.</p>'}</div>
+      <div class="runs-grid"><div class="runs-col"><h3>${runs.length ? `SambaNova activity · ${sambaEvents.length} requests` : "SambaNova estimated coding activity"}</h3>
+        ${runs.length ? `<div class="activity-list" data-scroll="samba-${escapeHtml(containerId)}-${escapeHtml(session.id)}">${sambaEvents.map((event) => eventRow(event, "sambanova")).join("")}${unavailableRunRows(runs)}</div>` : hasEstimate ? `<div class="activity-list" data-scroll="est-${escapeHtml(session.id)}">${[...estimate.events].reverse().map((event) => eventRow(event, "sambanova", true)).join("")}</div>` : '<p class="empty">No recorded SambaNova run or eligible coding-tool request in this session.</p>'}</div>
         <div class="runs-col"><h3>Claude Code activity · ${session.events.length} requests</h3><div class="activity-list" data-scroll="claude-${escapeHtml(session.id)}">${[...session.events].reverse().map((event) => eventRow(event, "claude")).join("") || '<p class="empty">No Claude requests.</p>'}</div></div>
     </article>`;
   }).join("");
@@ -109,23 +111,42 @@ function renderRates(data) {
   document.getElementById("rateRows").innerHTML = ["sambanova", "claude"].flatMap((provider) =>
     Object.entries(rates[provider]).filter(([name]) => !name.startsWith("_")).map(([name, rate]) =>
       `<tr><td>${escapeHtml(name)}</td><td>${rate.input.toFixed(2)}</td><td>${rate.output.toFixed(2)}</td><td>${rate.cached_input == null ? "Not offered" : rate.cached_input.toFixed(2)}</td><td>${rate.cache_write_5m == null ? "—" : rate.cache_write_5m.toFixed(2)}</td><td>${rate.cache_write_1h == null ? "—" : rate.cache_write_1h.toFixed(2)}</td></tr>`)).join("");
-  const select = document.getElementById("estimateModel");
-  if (!select.options.length) {
-    Object.keys(rates.sambanova).filter((name) => !name.startsWith("_")).forEach((name) => select.add(new Option(name, name)));
-    select.value = selectedModel;
+}
+
+function renderSessionBrowser(data) {
+  const index = data.session_index || [];
+  const picker = document.getElementById("sessionPicker");
+  const signature = JSON.stringify(index);
+  if (signature !== sessionIndexSignature) {
+    picker.innerHTML = '<option value="">Choose a saved session…</option>' + index.map((session) => {
+      const timestamp = new Date(session.updated_at);
+      const date = Number.isNaN(timestamp.getTime()) ? "Unknown date" : timestamp.toLocaleString();
+      return `<option value="${escapeHtml(session.id)}">${escapeHtml(`${date} · ${session.cwd || "unknown folder"} · ${session.id}`)}</option>`;
+    }).join("");
+    sessionIndexSignature = signature;
   }
+  picker.value = selectedSessionId;
+  picker.disabled = !index.length;
+  setText("sessionCount", `Latest ${data.sessions.length} of ${index.length} saved sessions`);
+  setText("sessionPickerStatus", data.selected_session_missing
+    ? "This session is no longer available in the logs. Choose another session."
+    : selectedSessionId
+      ? "Showing your selected session below. Clear the selection to close it."
+      : index.length ? `${index.length} saved sessions available, including older sessions.` : "No sessions with recorded usage found in the logs.");
+  if (data.selected_session) renderSessions([data.selected_session], "selectedSession");
+  else document.getElementById("selectedSession").innerHTML = "";
 }
 
 let refreshing = false;
 async function refresh() {
   if (refreshing) return;
   refreshing = true;
-  const model = selectedModel;
+  const requestedSessionId = selectedSessionId;
   try {
-    const response = await fetch(`/api/metrics?estimate_model=${encodeURIComponent(model)}`, { cache: "no-store" });
+    const response = await fetch(`/api/metrics?session_id=${encodeURIComponent(requestedSessionId)}`, { cache: "no-store" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const data = await response.json();
-    if (model !== selectedModel) return;
+    if (requestedSessionId !== selectedSessionId) return;
     const totals = data.totals;
     setText("updated", `Updated ${new Date(data.updated_at).toLocaleTimeString()}`);
     setText("hybridCost", money(totals.hybrid_cost));
@@ -134,15 +155,20 @@ async function refresh() {
     setText("savingsPct", `${Number(totals.savings_pct).toFixed(1)}% estimated difference`);
     setText("totalTokens", ints(totals.claude_tokens.total + totals.sambanova_tokens.total));
     setText("modelLabel", `Comparison: ${(totals.comparison_models || []).join(", ") || totals.dominant_claude_model}`);
-    setText("estimateSummary", `${data.estimation.eligible_requests} eligible requests · ${money(data.estimation.cost)} SambaNova estimate without cache reuse · ${money(data.estimation.projected_cost)} projected total across all sessions`);
     renderRates(data);
     renderSessions(data.sessions);
+    renderSessionBrowser(data);
   } catch (error) { setText("updated", `Unable to refresh: ${error.message}. Retrying…`); }
-  finally { refreshing = false; }
+  finally {
+    refreshing = false;
+    if (requestedSessionId !== selectedSessionId) refresh();
+  }
 }
 
-document.getElementById("estimateModel").addEventListener("change", (event) => {
-  selectedModel = event.target.value;
+document.getElementById("sessionPicker").addEventListener("change", (event) => {
+  selectedSessionId = event.target.value;
+  setText("sessionPickerStatus", selectedSessionId ? "Loading selected session…" : "Selection cleared.");
+  document.getElementById("selectedSession").innerHTML = "";
   refresh();
 });
 refresh();

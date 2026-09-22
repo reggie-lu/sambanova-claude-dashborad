@@ -278,10 +278,7 @@ pre {
 .tool-list span { overflow-wrap: anywhere; }
 .tool-list small { grid-column: 2; }
 .step-note { font-size: 12px; color: var(--muted); margin: 8px 0; }
-.run-detail { background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin-bottom: 8px; }
 summary { cursor: pointer; font-size: 14px; line-height: 1.7; }
-.run-detail summary small { display: block; }
-.run-detail summary strong { display: inline; margin-left: 6px; }
 .estimate-box { padding: 14px; border: 1px solid #d9caee; border-radius: 8px; background: #faf7ff; margin: 14px 0; font-size: 13px; }
 .estimate-box p { margin: 8px 0; color: var(--muted); }
 .estimate-tag { display: inline-block; margin-left: 10px; color: #7132a0; font-size: 11px; }
@@ -317,3 +314,12 @@ th, td { text-align: left; padding: 9px; border-bottom: 1px solid var(--line); w
 .cost-comparison small { display: block; font-size: 11px; line-height: 1.5; }
 @media (max-width: 1000px) { .session-cost-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 560px) { .session-cost-grid { grid-template-columns: 1fr; } }
+
+.session-browser { margin-top: 24px; border-top: 1px solid var(--line); padding-top: 20px; }
+.session-browser h3 { margin: 0 0 12px; font-size: 16px; }
+.session-browser label { display: block; margin-bottom: 8px; }
+.session-browser select { width: 100%; padding: 10px; }
+.session-browser > p { margin: 8px 0 16px; font-size: 12px; }
+.provider-label { flex-wrap: wrap; }
+
+.unavailable-run { padding: 12px; border: 1px dashed var(--line); border-radius: 8px; margin: 8px 0; }
