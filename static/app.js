@@ -283,7 +283,11 @@ async function refresh() {
     const data = await response.json();
     if (requestedSessionId !== selectedSessionId) return;
     const totals = data.totals;
-    setText("updated", `Updated ${new Date(data.updated_at).toLocaleTimeString()}`);
+    setText("updated", `Checked ${new Date(data.updated_at).toLocaleTimeString()}`);
+    const source = data.log_source;
+    setText("logSource", source?.kind === "snapshot"
+      ? `VM log snapshot · Exported ${source.manifest?.exported_at ? new Date(source.manifest.exported_at).toLocaleString() : "at an unknown time"} · ${source.folder}${source.manifest?.warnings?.length ? " · Export warnings: " + source.manifest.warnings.join(" ") : ""}`
+      : "Local logs · Refreshed every 5 seconds");
     setText("hybridCost", money(totals.hybrid_cost));
     setText("allClaudeCost", money(totals.all_claude_cost));
     setText("savings", money(Math.abs(totals.savings || 0)));
@@ -314,6 +318,29 @@ document.getElementById("directSetup").addEventListener("click", () => showSetup
 document.getElementById("hybridSetup").addEventListener("click", () => showSetup("hybrid", true));
 document.getElementById("guideDirect").addEventListener("click", () => showSetup("direct"));
 document.getElementById("guideHybrid").addEventListener("click", () => showSetup("hybrid"));
+const remoteCommands = {
+  Prepare: `COST_LENS_VM="user@your-vm"
+ssh "$COST_LENS_VM" 'mkdir -p "$HOME/cost-lens-tools"'
+scp provider_tracking.py timing.py scripts/export_logs.py "$COST_LENS_VM:cost-lens-tools/"
+ssh "$COST_LENS_VM" 'python3 "$HOME/cost-lens-tools/provider_tracking.py" --install --output "$HOME/.local/share/cost-lens/claude_providers.jsonl"'`,
+  Sync: `ssh "$COST_LENS_VM" 'python3 "$HOME/cost-lens-tools/export_logs.py" --output "$HOME/cost-lens-export"'
+mkdir -p data/imports/my-vm
+rsync -az "$COST_LENS_VM:cost-lens-export/" data/imports/my-vm/`,
+  Start: `COST_LENS_LOG_DIR="$PWD/data/imports/my-vm" \\
+HOST=127.0.0.1 PORT=5055 .venv/bin/python app.py`,
+  Offload: `ssh "$COST_LENS_VM" 'python3 "$HOME/cost-lens-tools/export_logs.py" --output "$HOME/cost-lens-export" --runs "/path/to/cost-lens/data/sambanova_runs.jsonl"'`,
+};
+for (const [name, command] of Object.entries(remoteCommands)) {
+  setText(`remote${name}`, command);
+  document.getElementById(`copyRemote${name}`).addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(command);
+      setText(`remote${name}Status`, "Copied. Review the destination and paths before running.");
+    } catch {
+      setText(`remote${name}Status`, "Copy unavailable. Select and copy the commands above.");
+    }
+  });
+}
 showSetup("direct");
 refresh();
 setInterval(refresh, 5000);

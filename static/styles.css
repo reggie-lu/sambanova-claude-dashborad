@@ -75,7 +75,20 @@ h1 span { color: #777080; }
 .secondary { background: #fff; color: #685041; border-color: #ded2c8; }
 .secondary:hover { background: #fbf3ed; }
 .options-caption { font-size: 11px; color: var(--muted); text-align: center; margin: 17px 25px 23px; }
-.setup-guide { background: #fff; border: 1px solid var(--line); border-radius: 12px; margin-bottom: 42px; }
+.setup-guide { background: #fff; border: 1px solid var(--line); border-radius: 12px; margin-bottom: 24px; }
+.remote-guide { scroll-margin-top: 24px; }
+.remote-guide pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.remote-intro { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; align-items: center; }
+.remote-intro h2 { font-size: 26px; margin: 10px 0; }
+.remote-intro p, .remote-step-copy p, .remote-note p { font-size: 13px; line-height: 1.7; }
+.transfer-flow { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 12px; padding: 30px 16px; border-radius: 12px; background: #f4effb; color: #67439c; }
+.transfer-flow b { font-size: 13px; }.transfer-flow small { flex-basis: 100%; text-align: center; font-size: 11px; margin-top: 8px; }
+.remote-steps { list-style: none; padding: 0; margin: 24px 0; }
+.remote-steps > li { display: grid; grid-template-columns: .8fr 1.2fr; gap: 28px; padding: 24px 0; border-top: 1px solid var(--line); align-items: start; }
+.remote-step-copy { min-width: 0; }.remote-step-copy h3 { margin: 8px 0; font-size: 18px; }.remote-step-copy code { overflow-wrap: anywhere; }
+.remote-note, .source-notice { background: #f4effb; border: 1px solid #e4d9f3; padding: 16px 20px; border-radius: 10px; font-size: 12px; line-height: 1.6; }
+.remote-note { margin-top: 24px; }.remote-note p { margin: 6px 0 0; }.source-notice { overflow-wrap: anywhere; margin-bottom: 24px; }
+@media (max-width: 850px) { .remote-intro, .remote-steps > li { grid-template-columns: 1fr; }.remote-steps > li { gap: 12px; } }
 summary { font-size: 12px; font-weight: 650; color: #555164; line-height: 1.7; }
 .setup-guide > summary { padding: 16px 22px; }
 .summary-hint { float: right; color: var(--muted); font-size: 11px; font-weight: 400; }

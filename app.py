@@ -15,6 +15,8 @@ from provider_tracking import PROVIDER_LOG, load_provider_history
 
 
 BASE_DIR = Path(__file__).resolve().parent
+LOG_BUNDLE = (Path(os.environ["COST_LENS_LOG_DIR"]).expanduser().resolve()
+              if os.environ.get("COST_LENS_LOG_DIR") else None)
 CLAUDE_PROJECTS_DIR = Path(
     os.environ.get("CLAUDE_PROJECTS_DIR", Path.home() / ".claude" / "projects")
 )
@@ -22,6 +24,10 @@ SAMBANOVA_RUNS_PATH = Path(
     os.environ.get("SAMBANOVA_RUNS_PATH", BASE_DIR / "data" / "sambanova_runs.jsonl")
 )
 RATES_PATH = Path(os.environ.get("RATES_PATH", BASE_DIR / "rates.json"))
+if LOG_BUNDLE:
+    CLAUDE_PROJECTS_DIR = LOG_BUNDLE / "projects"
+    SAMBANOVA_RUNS_PATH = LOG_BUNDLE / "sambanova_runs.jsonl"
+    PROVIDER_LOG = LOG_BUNDLE / "claude_providers.jsonl"
 
 app = Flask(__name__)
 
@@ -294,6 +300,10 @@ def scan_sambanova_runs() -> list[dict[str, Any]]:
     runs = list(by_id.values()) + anonymous_runs
     now_epoch = datetime.now(timezone.utc).timestamp()
     for run in runs:
+        if LOG_BUNDLE:
+            # Portable bundles may only reference their own copied detail files.
+            detail = (LOG_BUNDLE / str(run.get("log_path") or "missing")).resolve()
+            run["log_path"] = str(detail) if detail.is_relative_to(LOG_BUNDLE.resolve()) else ""
         steps = opencode_steps(run)
         for step in steps:
             if step["usage"] is not None:
@@ -309,6 +319,8 @@ def scan_sambanova_runs() -> list[dict[str, Any]]:
                 run[key] = sum(step[key] for step in measured)
             run["estimated"] = False
             run["usage_source"] = "completed log steps"
+        if LOG_BUNDLE and run.get("status") == "running":
+            run["status"] = "snapshot"
         tokens = sambanova_tokens(run)
         run["token_breakdown"] = tokens
         run["total_tokens"] = tokens["total"]
@@ -457,6 +469,11 @@ def summarize(
 
     return {
         "updated_at": datetime.now(timezone.utc).isoformat(),
+        "log_source": {
+            "kind": "snapshot" if LOG_BUNDLE else "local",
+            "folder": str(LOG_BUNDLE or CLAUDE_PROJECTS_DIR),
+            "manifest": load_json(LOG_BUNDLE / "manifest.json", {}) if LOG_BUNDLE else {},
+        },
         "paths": {
             "claude_projects_dir": str(CLAUDE_PROJECTS_DIR),
             "sambanova_runs_path": str(SAMBANOVA_RUNS_PATH),
@@ -651,6 +668,8 @@ def metrics():
 
 @app.post("/api/sambanova-runs")
 def add_sambanova_run():
+    if LOG_BUNDLE:
+        return jsonify({"error": "Imported log archives are read-only; record runs on the VM."}), 409
     payload = request.get_json(force=True)
     payload.setdefault("started_at", datetime.now(timezone.utc).isoformat())
     payload.setdefault("finished_at", datetime.now(timezone.utc).isoformat())

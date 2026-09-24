@@ -7,6 +7,7 @@ venv/
 
 # Local runtime data (recreated by the app; contains local paths & prompts)
 data/*.jsonl
+data/imports/
 
 # OS / editor
 .DS_Store

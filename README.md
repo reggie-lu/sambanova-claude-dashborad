@@ -214,3 +214,28 @@ The purple row shows cumulative tool execution and timing coverage; each tool in
 the activity list shows its own duration. These sums may include overlapping calls.
 Neither session spans nor `/code` response spans represent prefill, decoding, or
 exclusive model computation time.
+
+## Logs from another VM
+
+Open **Remote logs → Working on another machine?** in the dashboard for copyable
+SSH commands. Install the endpoint hook on the machine that runs Claude Code,
+restart Claude Code there, then use `scripts/export_logs.py` (Python 3.10+, no
+third-party dependencies) to export `~/.claude/projects` and endpoint history.
+For coding offload, supply `--runs /actual/path/sambanova_runs.jsonl`; the helper
+copies referenced detail logs and makes their paths portable. The VM must already
+have produced this tracking summary; the exporter does not install offload tracking.
+
+Copy the exported directory using rsync into `data/imports/my-vm/`, then start:
+
+```bash
+COST_LENS_LOG_DIR="$PWD/data/imports/my-vm" HOST=127.0.0.1 PORT=5055 .venv/bin/python app.py
+```
+
+`COST_LENS_LOG_DIR` selects one imported archive and takes precedence over the
+individual `CLAUDE_PROJECTS_DIR`, `CLAUDE_PROVIDER_LOG`, and `SAMBANOVA_RUNS_PATH`
+settings. Local and imported sessions are not merged. Imported running offloads
+are treated as snapshots: their VM PIDs are never checked locally and timing stops
+at the last observed step. The page displays the export time and export warnings.
+Re-export and rsync with the same options to update; previous transcripts remain
+archived, and repeated copies replace files without duplicating requests. Use a
+different directory for each VM. The UI polls local files, not the VM.

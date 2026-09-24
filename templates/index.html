@@ -12,7 +12,7 @@
   <a class="skip-link" href="#sessionsSection">Skip to sessions</a>
   <header class="topbar"><div class="nav-inner">
     <a class="app-brand" href="#"><img src="/static/sambanova-icon.png" alt="" width="32" height="32"><span>SambaNova <b>Cost Lens</b></span></a>
-    <nav aria-label="Main navigation"><a href="#options">The two setups</a><a href="#sessionsSection">Your sessions</a><a href="#pricing">Pricing</a></nav>
+    <nav aria-label="Main navigation"><a href="#options">The two setups</a><a href="#sessionsSection">Your sessions</a><a href="#remoteLogs">Remote logs</a><a href="#pricing">Pricing</a></nav>
     <div class="status"><span class="pulse" aria-hidden="true"></span><span id="updated" role="status">Connecting to local logs…</span></div>
   </div></header>
   <main class="shell">
@@ -59,7 +59,10 @@
       </div>
     </details>
 
+    {% include 'remote_logs.html' %}
+
     <section class="overview" aria-labelledby="overviewTitle">
+      <p id="logSource" class="source-notice" role="status">Reading local logs</p>
       <div class="section-heading"><div><p class="eyebrow">YOUR USAGE, IN PERSPECTIVE</p><h2 id="overviewTitle">See what your setup saves.</h2></div><span class="scope-label">All recorded sessions · USD</span></div>
       <div class="scoreboard">
         <article class="actual-score"><span>Recorded usage cost</span><strong id="hybridCost">—</strong><small>Claude + SambaNova at API rates</small></article>

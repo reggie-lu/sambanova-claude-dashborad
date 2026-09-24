@@ -158,6 +158,15 @@ test('saved-session selection survives refresh, clears, and handles missing logs
   await element('copyReturnToClaude').handlers.click();
   assert.equal(copiedCommands, 'unset ANTHROPIC_BASE_URL\nunset ANTHROPIC_API_KEY\nunset ANTHROPIC_AUTH_TOKEN\nunset ANTHROPIC_MODEL');
   assert(element('copyReturnStatus').textContent.includes('Copied.'));
+  await element('copyRemotePrepare').handlers.click();
+  assert(copiedCommands.includes('provider_tracking.py timing.py scripts/export_logs.py'));
+  await element('copyRemoteSync').handlers.click();
+  assert(copiedCommands.includes('rsync -az'));
+  assert(copiedCommands.includes('data/imports/my-vm/'));
+  await element('copyRemoteStart').handlers.click();
+  assert(copiedCommands.includes('COST_LENS_LOG_DIR='));
+  assert(copiedCommands.includes('HOST=127.0.0.1 PORT=5055'));
+  assert(element('remoteStartStatus').textContent.includes('Copied.'));
   element('sessionPicker').handlers.change({target: {value: 'session-27'}});
   await tick();
   assert(requests.at(-1).includes('session_id=session-27'));
