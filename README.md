@@ -3,14 +3,59 @@
 Small Flask dashboard for comparing Claude model usage, SambaNova coding-tool offload,
 and Claude Code running directly on SambaNova models.
 
+## Setup
+
+Requirements: Python 3.10+ (the code uses `X | None` type syntax; macOS's system
+`/usr/bin/python3` is 3.9 and will not work) and Flask. Node.js is only needed for
+the frontend test.
+
+```bash
+git clone <repo-url> sambanova-claude-dashborad
+cd sambanova-claude-dashborad
+python3.13 -m venv .venv            # any Python 3.10+; e.g. brew install python@3.13
+.venv/bin/pip install -r requirements.txt
+```
+
+Optional checks:
+
+```bash
+.venv/bin/python -m unittest discover -s tests -v
+node tests/test_frontend.cjs
+```
+
 ## Run
 
 ```bash
-cd /Users/bowenl/work/sambanova-claude-dashborad
-python app.py
+.venv/bin/python app.py
 ```
 
-Open <http://127.0.0.1:5055>.
+Open <http://127.0.0.1:5055>. Override with `HOST=0.0.0.0 PORT=8080 .venv/bin/python app.py`;
+set `FLASK_DEBUG=1` for auto-reload. With no further setup the dashboard already shows
+your Claude Code sessions from `~/.claude/projects`.
+
+### Optional next steps
+
+1. **Endpoint tracking** (recommended if you run Claude Code against SambaNova directly):
+   `.venv/bin/python provider_tracking.py --install`, then restart Claude Code.
+   See [Claude Code with a SambaNova model](#claude-code-with-a-sambanova-model).
+2. **Coding offload** via the SambaNova `/code` plugin: in Claude Code, run
+   `/plugin marketplace add sambanova/sambanova-plugin-cc` and follow the
+   [plugin setup guide](https://github.com/sambanova/sambanova-plugin-cc#installation).
+   Runs are tracked only if something writes `data/sambanova_runs.jsonl`; see
+   [Coding offload tracking](#coding-offload-tracking).
+3. **Pricing**: review `rates.json`, especially SambaNova rates for your account.
+
+### Environment variables
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `HOST` / `PORT` | `127.0.0.1` / `5055` | Bind address |
+| `FLASK_DEBUG` | off | `1` enables Flask debug/reload |
+| `CLAUDE_PROJECTS_DIR` | `~/.claude/projects` | Claude Code transcripts |
+| `CLAUDE_PROVIDER_LOG` | `data/claude_providers.jsonl` | Endpoint hook output |
+| `SAMBANOVA_RUNS_PATH` | `data/sambanova_runs.jsonl` | Tracked `/code` runs |
+| `RATES_PATH` | `rates.json` | Pricing table |
+| `COST_LENS_LOG_DIR` | unset | Read an imported VM archive instead (overrides the three log paths) |
 
 ## Dashboard experience
 
@@ -35,25 +80,21 @@ The dashboard polls:
 - `~/.claude/projects/**/*.jsonl` for Claude Code sessions and recorded model token usage.
 - `data/sambanova_runs.jsonl` for tracked SambaNova runs.
 
-The installed `samba-claude` plugin entrypoint has also been instrumented locally, so normal Claude CLI use of the SambaNova `/code` tool writes to the same `data/sambanova_runs.jsonl` file automatically.
+## Coding offload tracking
 
-In Claude CLI, use the upstream plugin syntax:
+In Claude Code, the upstream `samba-claude` plugin syntax is:
 
 ```text
-/code MiniMax-M2.7 /Users/bowenl/work/sambanova-claude-dashborad "Review this project and suggest improvements"
-/code MiniMax-M2.7 /Users/bowenl/work/sambanova-claude-dashborad "Continue the previous task" --session <id>
+/code MiniMax-M2.7 /path/to/project "Review this project and suggest improvements"
+/code MiniMax-M2.7 /path/to/project "Continue the previous task" --session <id>
 ```
 
-## Track a SambaNova coding run
-
-The wrapper is optional and mainly useful for direct terminal testing:
-
-```bash
-python scripts/run_samba_tracked.py opencode MiniMax-M2.7 /Users/bowenl/work/sambanova-claude-dashborad \
-  "Review this demo and report token usage" -- --format json
-```
-
-The wrapper invokes the installed `samba-claude` plugin script, captures stdout/stderr, parses token usage when the tool prints it, and appends a JSONL record. If usage is not printed, it marks the run as estimated.
+The stock plugin does **not** write to `data/sambanova_runs.jsonl`. On the original
+author's machine the installed plugin entrypoint was instrumented by hand to append a
+record per run; that change and the `run_samba_tracked.py` wrapper mentioned in older
+versions of this README are not part of this repository. To get `/code` runs onto the
+dashboard, append records yourself (see [Manual ingest](#manual-ingest)) or add a hook
+that does so. Without records, Claude-only sessions still show a SambaNova *estimate*.
 
 ## Claude Code with a SambaNova model
 
