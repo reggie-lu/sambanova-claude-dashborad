@@ -299,7 +299,8 @@ def scan_claude_sessions() -> list[dict[str, Any]]:
                 "rate_fallback": model not in RATES.get("claude", {}),
             })
         session["events"].sort(key=lambda item: iso_to_epoch(item.get("timestamp")))
-        session["latency"] = session_latency(streams_by_session[session_id], proxy_records)
+        session["latency"] = session_latency(streams_by_session[session_id], proxy_records,
+                                             datetime.now(timezone.utc).timestamp() * 1000)
         session["unlogged_usage"] = unlogged_usage(streams_by_session[session_id])
         session["models"] = dict(session["models"])
         session["agents"] = dict(session["agents"])

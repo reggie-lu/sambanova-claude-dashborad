@@ -192,26 +192,88 @@ def turn_intervals(records: list[dict[str, Any]]) -> list[tuple[float, float]]:
     return turns
 
 
-def partition(intervals: list[tuple[float, float, str]], span: tuple[float, float]) -> dict[str, float]:
-    """Sweep once over all boundaries; gaps are overhead inside turns, idle outside."""
+LIVE_WINDOW_MS = 5 * 60 * 1000  # a stream with activity this recent is drawn up to now
+MAX_SEGMENTS = 4000
+
+
+def sweep(intervals: list[tuple], span: tuple[float, float]) -> tuple[dict[str, float], list[list]]:
+    """Sweep once over all boundaries; gaps are overhead inside turns, idle outside.
+
+    Returns per-category totals and the time-ordered segments behind them, each
+    labeled with the most recently started interval of the winning category.
+    """
     totals = dict.fromkeys(CATEGORIES, 0.0)
+    segments: list[list] = []
     events = []
-    for start, end, category in intervals:
-        start, end = max(start, span[0]), min(end, span[1])
+    for interval in intervals:
+        start, end, category = max(interval[0], span[0]), min(interval[1], span[1]), interval[2]
+        label = interval[3] if len(interval) > 3 else ""
         if end > start:
-            events += [(start, 1, category), (end, -1, category)]
+            events += [(start, 1, category, label), (end, -1, category, label)]
     events.sort(key=lambda event: (event[0], event[1]))
-    active: defaultdict[str, int] = defaultdict(int)
+    active: defaultdict[str, list[str]] = defaultdict(list)
     cursor = span[0]
-    for time, delta, category in events + [(span[1], 0, "")]:
+    for time, delta, category, label in events + [(span[1], 0, "", "")]:
         if time > cursor:
-            live = [name for name, count in active.items() if count > 0]
+            live = [name for name, labels in active.items() if labels]
             winner = min(live, key=PRIORITY.__getitem__) if live else "idle"
+            winner_label = active[winner][-1] if live else ""
             totals[winner] += time - cursor
+            if segments and segments[-1][2] == winner and segments[-1][3] == winner_label \
+                    and segments[-1][1] == cursor:
+                segments[-1][1] = time
+            else:
+                segments.append([cursor, time, winner, winner_label])
             cursor = time
         if category:
-            active[category] += delta
-    return totals
+            if delta > 0:
+                active[category].append(label)
+            elif label in active[category]:
+                active[category].remove(label)
+    return totals, segments
+
+
+def partition(intervals: list[tuple], span: tuple[float, float]) -> dict[str, float]:
+    return sweep(intervals, span)[0]
+
+
+def timeline(segments: list[list], span: tuple[float, float], live: bool) -> dict[str, Any]:
+    """Compact segments: [offset ms, duration ms, category index, label index]."""
+    labels: dict[str, int] = {}
+    rows = [[round(start - span[0]), round(end - start), PRIORITY[category],
+             labels.setdefault(label, len(labels))]
+            for start, end, category, label in segments[-MAX_SEGMENTS:]]
+    return {"start_ms": span[0], "end_ms": span[1], "live": live, "categories": CATEGORIES,
+            "labels": list(labels), "segments": rows, "truncated": len(segments) > MAX_SEGMENTS}
+
+
+def open_intervals(records: list[dict[str, Any]], requests: list[dict[str, Any]],
+                   results: dict[str, dict[str, Any]], turns: list[tuple[float, float]],
+                   now_ms: float) -> list[tuple]:
+    """What a live stream is doing right now: an unanswered request, running tools, the open turn."""
+    answered = {record.get("requestRef") for record in records if record.get("type") == "assistant"}
+    last_response = max((request["end_ms"] for request in requests if request["end_ms"]), default=0)
+    pending = [timestamp_ms(record.get("timestamp")) for record in records
+               if record.get("type") == "api-request" and record.get("id") not in answered]
+    pending = [value for value in pending if value is not None and value >= last_response]
+    intervals: list[tuple] = []
+    if pending:
+        intervals.append((max(pending), now_ms, "first_token", "waiting for model"))
+    for record in records:
+        message = record.get("message")
+        if record.get("type") != "assistant" or not isinstance(message, dict):
+            continue
+        for block in message.get("content") if isinstance(message.get("content"), list) else []:
+            started = timestamp_ms(record.get("timestamp"))
+            if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("id") not in results \
+                    and started is not None and now_ms - started < 6 * 3600 * 1000:
+                intervals.append((started, now_ms, "tool", block.get("name") or "tool"))
+    prompts = [value for record in records if is_prompt(record)
+               if (value := timestamp_ms(record.get("timestamp"))) is not None]
+    last_turn_end = max((end for _, end in turns), default=0)
+    if prompts and max(prompts) > last_turn_end:
+        intervals.append((max(prompts), now_ms, "overhead", ""))
+    return intervals
 
 
 def server_summary(requests: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -229,17 +291,18 @@ def server_summary(requests: list[dict[str, Any]]) -> dict[str, Any] | None:
 
 
 def stream_latency(records: list[dict[str, Any]], label: str,
-                   proxy: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+                   proxy: dict[str, dict[str, Any]] | None = None,
+                   now_ms: float | None = None) -> dict[str, Any]:
     requests = stream_requests(records, proxy)
     results = tool_results(records)
     turns = turn_intervals(records)
-    intervals: list[tuple[float, float, str]] = [(start, end, "overhead") for start, end in turns]
+    intervals: list[tuple] = [(start, end, "overhead") for start, end in turns]
     tools: list[dict[str, Any]] = []
     for request in requests:
         if request["request_ms"] is not None and request["first_token_ms"] is not None:
-            intervals.append((request["request_ms"], request["first_token_ms"], "first_token"))
+            intervals.append((request["request_ms"], request["first_token_ms"], "first_token", request["model"]))
         if request["first_token_ms"] is not None and request["end_ms"] is not None:
-            intervals.append((request["first_token_ms"], request["end_ms"], "generation"))
+            intervals.append((request["first_token_ms"], request["end_ms"], "generation", request["model"]))
         for tool_id, name, started in request["tool_uses"]:
             result = results.get(tool_id, {})
             ended = result.get("end_ms")
@@ -248,12 +311,17 @@ def stream_latency(records: list[dict[str, Any]], label: str,
             tools.append({"name": name or "tool", "duration_ms": duration, "approval": approved,
                           "error": result.get("error", False)})
             if duration is not None:
-                intervals.append((started, ended, "approval" if approved == "you" else "tool"))
+                intervals.append((started, ended, "approval" if approved == "you" else "tool", name or "tool"))
         request["tools"] = [tool["name"] for tool in tools[-len(request["tool_uses"]):]] if request["tool_uses"] else []
         request["tool_ms"] = sum(tool["duration_ms"] or 0 for tool in tools[-len(request["tool_uses"]):]) if request["tool_uses"] else 0
         del request["tool_uses"]
     times = [value for record in records if (value := timestamp_ms(record.get("timestamp"))) is not None]
     span = (min(times), max(times)) if times else None
+    live = bool(span and now_ms is not None and 0 <= now_ms - span[1] < LIVE_WINDOW_MS)
+    if live:
+        intervals += open_intervals(records, requests, results, turns, now_ms)
+        span = (span[0], now_ms)
+    totals, segments = sweep(intervals, span) if span else (dict.fromkeys(CATEGORIES, 0.0), [])
     by_tool: defaultdict[str, dict[str, Any]] = defaultdict(lambda: {"count": 0, "duration_ms": 0.0, "durations": []})
     for tool in tools:
         entry = by_tool[tool["name"]]
@@ -274,7 +342,9 @@ def stream_latency(records: list[dict[str, Any]], label: str,
     return {
         "label": label,
         "span_ms": span[1] - span[0] if span else None,
-        "breakdown_ms": partition(intervals, span) if span else dict.fromkeys(CATEGORIES, 0.0),
+        "breakdown_ms": totals,
+        "timeline": timeline(segments, span, live) if span else None,
+        "current": segments[-1][2] if live and segments else None,
         "request_count": len(requests),
         "timed_request_count": sum(1 for request in requests if request["request_ms"] is not None),
         "models": dict(models),
@@ -295,9 +365,10 @@ def stream_latency(records: list[dict[str, Any]], label: str,
 
 
 def session_latency(streams: list[tuple[str, list[dict[str, Any]]]],
-                    proxy: dict[str, dict[str, Any]] | None = None) -> dict[str, Any] | None:
+                    proxy: dict[str, dict[str, Any]] | None = None,
+                    now_ms: float | None = None) -> dict[str, Any] | None:
     """Main thread is the session's critical path; subagents are reported alongside it."""
-    results = [stream_latency(records, label, proxy) for label, records in streams if records]
+    results = [stream_latency(records, label, proxy, now_ms) for label, records in streams if records]
     results = [result for result in results if result["request_count"]]
     if not results:
         return None

@@ -272,7 +272,16 @@ writes, so it works the same for SambaNova-backed and Claude-backed sessions:
 | Idle | Time between turns |
 
 Overlapping intervals count once, in that priority order, so the parts add up to the
-session span. Subagents are listed beside the main agent. Decode speed is output tokens
+session span.
+
+The **Timeline** draws those parts at their real times as horizontal bars, one lane for
+the main agent and one for each subagent active in the window. Hover a segment for its
+model or tool, duration and start time. Pick the last 15 minutes, hour, 6 hours or the
+whole session; **Collapse idle gaps** shrinks idle stretches longer than 30 s to a
+labeled sliver so active time stays readable. A session with activity in the last
+5 minutes is **Live**: the axis runs to now, an unanswered request or running tool is
+drawn up to now, and the badge names what the agent is doing. The page refreshes
+every 5 seconds. Subagents are listed beside the main agent. Decode speed is output tokens
 per generating second, only where the first token was measured. When a response starts
 with text, only an upper bound on first-token time is known; these are marked "≤".
 

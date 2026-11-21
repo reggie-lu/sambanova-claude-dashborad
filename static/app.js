@@ -166,6 +166,106 @@ function serverSplit(server) {
     <small>${escapeHtml(reported)}${server.header_names.length ? ` · timing headers: ${escapeHtml(server.header_names.join(", "))}` : ""}</small></div>`;
 }
 
+const timelineViews = new Map();
+const lastRendered = new Map();
+const PART_NAMES = Object.fromEntries([...LATENCY_PARTS.map(([key, name]) => [key, name]), ["idle", "Idle"]]);
+const WINDOWS = [["900000", "Last 15 min"], ["3600000", "Last hour"], ["21600000", "Last 6 hours"], ["all", "Whole session"]];
+
+function laneSegments(stream) {
+  const t = stream.timeline;
+  if (!t) return [];
+  return t.segments.map(([offset, duration, category, label]) => ({
+    start: t.start_ms + offset, end: t.start_ms + offset + duration,
+    category: t.categories[category], label: t.labels[label] || "",
+  }));
+}
+
+// Piecewise axis: active time at true scale, long all-idle gaps shrunk to a fixed sliver.
+function buildAxis(lanes, from, to, collapse) {
+  const active = lanes.flat().filter((seg) => seg.category !== "idle" && seg.end > from && seg.start < to)
+    .map((seg) => [Math.max(seg.start, from), Math.min(seg.end, to)]).sort((a, b) => a[0] - b[0]);
+  const merged = [];
+  for (const [start, end] of active) {
+    if (merged.length && start <= merged[merged.length - 1][1]) merged[merged.length - 1][1] = Math.max(merged[merged.length - 1][1], end);
+    else merged.push([start, end]);
+  }
+  const activeTotal = merged.reduce((sum, [start, end]) => sum + end - start, 0);
+  const sliver = Math.max(activeTotal * 0.025, 1000);
+  const pieces = [];
+  let cursor = from;
+  const gap = (start, end) => {
+    if (end <= start) return;
+    const shrink = collapse && end - start > 30000 && end - start > sliver;
+    pieces.push({start, end, weight: shrink ? sliver : end - start, collapsed: shrink});
+  };
+  for (const [start, end] of merged) { gap(cursor, start); pieces.push({start, end, weight: end - start, collapsed: false}); cursor = end; }
+  gap(cursor, to);
+  const total = pieces.reduce((sum, piece) => sum + piece.weight, 0) || 1;
+  let acc = 0;
+  for (const piece of pieces) { piece.x0 = acc / total; acc += piece.weight; piece.x1 = acc / total; }
+  const x = (time) => {
+    if (time <= from) return 0;
+    if (time >= to) return 1;
+    const piece = pieces.find((item) => time >= item.start && time <= item.end) || pieces[pieces.length - 1];
+    return piece.x0 + (piece.x1 - piece.x0) * ((time - piece.start) / ((piece.end - piece.start) || 1));
+  };
+  return {x, pieces};
+}
+
+function timelineBox(session, disclosureKey) {
+  const latency = session.latency;
+  const streams = [latency.main, ...latency.subagents].filter((stream) => stream.timeline);
+  if (!streams.length) return "";
+  const live = latency.main.timeline.live;
+  const view = timelineViews.get(disclosureKey) || {win: live ? "900000" : "all", collapse: true};
+  const end = Math.max(...streams.map((stream) => stream.timeline.end_ms));
+  const sessionStart = Math.min(...streams.map((stream) => stream.timeline.start_ms));
+  const from = view.win === "all" ? sessionStart : Math.max(sessionStart, end - Number(view.win));
+  // The main agent always shows; subagents only when they did something in the window.
+  const visible = streams.map((stream) => [stream, laneSegments(stream)])
+    .filter(([stream, segs], index) => index === 0 || segs.some((seg) => seg.category !== "idle" && seg.end > from && seg.start < end));
+  const lanes = visible.map(([, segs]) => segs);
+  const hidden = streams.length - visible.length;
+  const axis = buildAxis(lanes, from, end, view.collapse);
+  const lanesHtml = visible.map(([stream], index) => {
+    const spans = lanes[index].filter((seg) => seg.end > from && seg.start < end).map((seg) => {
+      const left = axis.x(seg.start) * 100;
+      const width = Math.max((axis.x(seg.end) - axis.x(seg.start)) * 100, seg.category === "idle" ? 0 : 0.08);
+      if (width <= 0) return "";
+      const title = `${PART_NAMES[seg.category]}${seg.label ? ` · ${seg.label}` : ""} · ${durationText(seg.end - seg.start)} · ${new Date(seg.start).toLocaleTimeString()}`;
+      return `<span class="tl-seg lat-${seg.category}" style="left:${left.toFixed(3)}%;width:${width.toFixed(3)}%" title="${escapeHtml(title)}"></span>`;
+    }).join("");
+    const current = stream.current ? `<em class="tl-now-state lat-text-${stream.current}">${escapeHtml(PART_NAMES[stream.current])}</em>` : "";
+    return `<div class="tl-lane"><span class="tl-label" title="${escapeHtml(stream.label)}">${escapeHtml(stream.label.replace(/^Subagent · /, "↳ "))}${current}</span><div class="tl-track">${spans}</div></div>`;
+  }).join("");
+  const gaps = axis.pieces.filter((piece) => piece.collapsed && piece.x1 - piece.x0 > 0.012)
+    .map((piece) => `<span class="tl-gap" style="left:${(piece.x0 * 100).toFixed(3)}%;width:${((piece.x1 - piece.x0) * 100).toFixed(3)}%" title="${escapeHtml(`Idle ${durationText(piece.end - piece.start)}, collapsed`)}">${durationText(piece.end - piece.start).split(" ")[0]}</span>`).join("");
+  const options = WINDOWS.map(([value, name]) => `<option value="${value}" ${view.win === value ? "selected" : ""}>${name}</option>`).join("");
+  return `<div class="timeline-plot">
+    <div class="tl-head"><b>Timeline</b>${live ? `<span class="live-badge"><i aria-hidden="true"></i>Live · now ${escapeHtml(PART_NAMES[latency.main.current] || "idle")}</span>` : ""}
+      <label>Window <select data-timeline-key="${escapeHtml(disclosureKey)}" data-timeline-field="win">${options}</select></label>
+      <label class="tl-check"><input type="checkbox" data-timeline-key="${escapeHtml(disclosureKey)}" data-timeline-field="collapse" ${view.collapse ? "checked" : ""}> Collapse idle gaps</label></div>
+    <div class="tl-body" role="img" aria-label="${escapeHtml(`Timeline of ${streams.length} agent lanes from ${new Date(from).toLocaleString()} to ${new Date(end).toLocaleString()}`)}">${lanesHtml}
+      <div class="tl-lane tl-axis-lane"><span class="tl-label"></span><div class="tl-axis">${gaps}${live ? '<span class="tl-now" title="Now"></span>' : ""}</div></div></div>
+    <div class="timing-axis tl-times"><small>${escapeHtml(new Date(from).toLocaleString())}${hidden ? ` · ${hidden} subagent${hidden === 1 ? "" : "s"} idle in this window` : ""}</small><small>${live ? "now · " : ""}${escapeHtml(new Date(end).toLocaleString())}</small></div>
+  </div>`;
+}
+
+function rerenderSessions() {
+  for (const [containerId, sessions] of lastRendered) { renderedSessions.delete(containerId); renderSessions(sessions, containerId); }
+}
+
+function onTimelineChange(event) {
+  const key = event.target.dataset?.timelineKey;
+  if (!key) return;
+  const view = {...(timelineViews.get(key) || {win: event.target.closest(".timeline-plot")?.querySelector("select")?.value || "all", collapse: true})};
+  view[event.target.dataset.timelineField] = event.target.type === "checkbox" ? event.target.checked : event.target.value;
+  if (event.target.type === "checkbox") view.win = event.target.closest(".timeline-plot").querySelector("select").value;
+  else view.collapse = event.target.closest(".timeline-plot").querySelector("input[type=checkbox]").checked;
+  timelineViews.set(key, view);
+  rerenderSessions();
+}
+
 function latencyBox(session, disclosureKey) {
   const latency = session.latency;
   if (!latency) return "";
@@ -180,7 +280,9 @@ function latencyBox(session, disclosureKey) {
   const openKey = `${disclosureKey}-latency`;
   return `<section class="latency-box" aria-label="Where the time went">
     <div class="timing-heading"><h3>Where the time went</h3><span>${durationText(active)} active · ${durationText(breakdown.idle)} idle between turns</span></div>
+    ${timelineBox(session, disclosureKey)}
     <div class="latency-legend">${LATENCY_PARTS.map(([key, name, help]) => `<span title="${escapeHtml(help)}"><i class="lat-dot lat-${key}" aria-hidden="true"></i>${name} <b>${durationText(breakdown[key] || 0)}</b> <small>${pctOf(breakdown, key)}</small></span>`).join("")}</div>
+    <div class="tl-head"><b>Whole session</b><span class="subtle">Main agent active time by share</span></div>
     ${latencyBar(breakdown, "Main agent active time")}
     <div class="latency-stats">
       <div><span>Bottleneck</span><b>${escapeHtml(bottleneck[1])}</b><small>${pctOf(breakdown, bottleneck[0])} of active time</small></div>
@@ -284,6 +386,7 @@ function renderSessions(sessions, containerId = "sessions") {
   container.querySelectorAll("[data-scroll]").forEach((el) => scrollPositions.set(el.dataset.scroll, el.scrollTop));
   container.querySelectorAll("[data-disclosure]").forEach((el) => disclosureStates.set(el.dataset.disclosure, el.open));
   renderedSessions.set(containerId, signature);
+  lastRendered.set(containerId, sessions);
   if (!sessions.length) { container.innerHTML = '<div class="empty empty-panel"><b>No sessions to show here yet.</b><p>Try another setup filter, browse saved sessions, or run a task in Claude Code.</p></div>'; return; }
   container.innerHTML = sessions.map((session) => {
     const samba = session.sambanova;
@@ -409,6 +512,7 @@ document.getElementById("sessionPicker").addEventListener("change", (event) => {
   refresh();
 });
 document.getElementById("sessionFilter").addEventListener("change", renderRecentSessions);
+for (const id of ["sessions", "selectedSession"]) document.getElementById(id).addEventListener("change", onTimelineChange);
 document.getElementById("directSetup").addEventListener("click", () => showSetup("direct", true));
 document.getElementById("hybridSetup").addEventListener("click", () => showSetup("hybrid", true));
 document.getElementById("guideDirect").addEventListener("click", () => showSetup("direct"));

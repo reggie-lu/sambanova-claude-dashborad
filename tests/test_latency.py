@@ -5,6 +5,11 @@ import app
 from latency import partition, session_latency, stream_latency
 
 
+def _ms(seconds):
+    from timing import timestamp_ms
+    return timestamp_ms(at(seconds))
+
+
 def at(seconds):
     return f"2026-11-20T00:00:{seconds:06.3f}Z" if seconds < 60 else f"2026-11-20T00:{int(seconds // 60):02d}:{seconds % 60:06.3f}Z"
 
@@ -82,6 +87,30 @@ class LatencyTests(unittest.TestCase):
         totals = partition([(0, 10, "tool"), (5, 8, "generation"), (0, 20, "overhead")], (0, 30))
         self.assertEqual(totals, {"generation": 3, "first_token": 0, "approval": 0,
                                   "tool": 7, "overhead": 10, "idle": 10})
+
+    def test_segments_follow_time_order_with_labels_and_cover_the_span(self):
+        result = stream_latency(session(), "Main agent")
+        t = result["timeline"]
+        parts = [(t["categories"][category], t["labels"][label], duration)
+                 for _, duration, category, label in t["segments"]]
+        self.assertEqual(parts[:5], [("overhead", "", 1000), ("first_token", "GLM-5.3", 2000),
+                                     ("generation", "GLM-5.3", 3000), ("tool", "Bash", 4000),
+                                     ("overhead", "", 500)])
+        self.assertEqual(parts[-1], ("idle", "", 30000))
+        self.assertEqual(sum(duration for _, duration, _, _ in t["segments"]), result["span_ms"])
+        self.assertFalse(t["live"])
+        self.assertIsNone(result["current"])
+
+    def test_live_stream_draws_open_request_and_tool_up_to_now(self):
+        records = session()[:4] + [{"type": "api-request", "id": "r9", "timestamp": at(7)}]
+        result = stream_latency(records, "Main agent", now_ms=_ms(9))
+        self.assertTrue(result["timeline"]["live"])
+        self.assertEqual(result["span_ms"], 9000)
+        # The unanswered request (7-9 s) outranks the still-running Bash call.
+        self.assertEqual(result["current"], "first_token")
+        self.assertEqual(result["breakdown_ms"]["tool"], 1000)  # Bash 6-7 s, then the request takes over
+        stale = stream_latency(records, "Main agent", now_ms=_ms(9) + 10 * 60 * 1000)
+        self.assertFalse(stale["timeline"]["live"])
 
     def test_subagents_are_reported_beside_the_main_agent(self):
         latency = session_latency([("Main agent", session()), ("Subagent · docs", session())])
