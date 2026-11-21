@@ -311,8 +311,12 @@ function latencyBox(session, disclosureKey) {
 function renderLatencyComparison(rows) {
   const body = document.getElementById("latencyRows");
   if (!body) return;
-  body.innerHTML = rows.map((row) => `<tr><th scope="row"><span class="provider-chip ${row.provider}">${row.provider === "sambanova" ? "SambaNova" : row.provider === "claude" ? "Claude" : "Other"}</span>${escapeHtml(row.model)}</th><td>${ints(row.requests)}<small> · ${row.sessions} sessions</small></td><td>${durationText(row.ttft_p50_ms)}</td><td>${durationText(row.ttft_p90_ms)}</td><td>${rate(row.tokens_per_s_p50)}</td><td class="latency-share">${latencyBar(row.breakdown_ms, row.model)}<small>Model wait ${pctOf(row.breakdown_ms, "first_token")} · generating ${pctOf(row.breakdown_ms, "generation")} · tools ${pctOf(row.breakdown_ms, "tool")}</small></td></tr>`).join("")
+  body.innerHTML = rows.map((row) => `<tr><th scope="row"><span class="provider-chip ${row.provider}">${row.provider === "sambanova" ? "SambaNova" : row.provider === "claude" ? "Claude" : "Other"}</span>${escapeHtml(row.model)}</th><td>${ints(row.requests)}<small> · ${row.sessions} sessions</small></td><td>${durationText(row.ttft_p50_ms)}</td><td>${durationText(row.ttft_p90_ms)}</td><td>${rate(row.tokens_per_s_p50)}</td><td class="latency-share">${latencyBar(row.breakdown_ms, row.model)}<small>${LATENCY_PARTS.map(([key, name]) => `<span class="share-item"><i class="lat-dot lat-${key}" aria-hidden="true"></i>${name} ${pctOf(row.breakdown_ms, key)}</span>`).join("")}</small></td></tr>`).join("")
     || '<tr><td colspan="6" class="empty">No timed model requests yet.</td></tr>';
+  const legend = document.getElementById("latencyLegend");
+  if (legend && !legend.innerHTML) legend.innerHTML = LATENCY_PARTS.map(([key, name, help]) =>
+    `<div><dt><i class="lat-dot lat-${key}" aria-hidden="true"></i>${name}</dt><dd>${help}.</dd></div>`).join("")
+    + '<div><dt><i class="lat-dot lat-idle-key" aria-hidden="true"></i>Idle (not in the bar)</dt><dd>Time between turns, such as waiting for your next message. Left out so the bar shows only working time.</dd></div>';
 }
 
 function unloggedNote(session) {

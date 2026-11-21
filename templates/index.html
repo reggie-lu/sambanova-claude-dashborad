@@ -76,7 +76,17 @@
     <section id="latency" class="panel latency-panel" aria-labelledby="latencyTitle">
       <div class="section-heading"><div><p class="eyebrow">WHERE THE TIME GOES</p><h2 id="latencyTitle">Latency by model</h2></div><span class="scope-label">All recorded sessions · client-side</span></div>
       <p class="subtle">Every model request across your sessions, grouped by model. Time to first token is measured from the request being sent and includes network, queue and prefill. The bar shows each model's share of active session time, by its sessions' main agent.</p>
-      <div class="table-scroll"><table class="latency-table"><thead><tr><th scope="col">Model</th><th scope="col">Requests</th><th scope="col">First token p50</th><th scope="col">First token p90</th><th scope="col">Decode p50</th><th scope="col">Active time</th></tr></thead><tbody id="latencyRows"></tbody></table></div>
+      <div class="table-scroll"><table class="latency-table"><thead><tr><th scope="col">Model</th><th scope="col">Requests</th><th scope="col" title="Median time from sending a request to receiving the first token">First token p50</th><th scope="col" title="90% of requests got their first token within this time">First token p90</th><th scope="col" title="Median output tokens per second while the response was streaming">Decode p50</th><th scope="col" title="Share of working time in each part, for sessions where this model ran the main agent">Active time</th></tr></thead><tbody id="latencyRows"></tbody></table></div>
+      <div class="latency-key">
+        <h3>How to read the columns</h3>
+        <dl>
+          <div><dt>First token p50 / p90</dt><dd>Time from Claude Code sending a request until the first token comes back. p50 is the typical request; p90 is a slow one (9 in 10 are faster). It includes network, the provider's queue and prefill, measured on your machine.</dd></div>
+          <div><dt>Decode p50</dt><dd>Output tokens per second once the response is streaming: how fast the model writes. Only requests with a measured first token count.</dd></div>
+          <div><dt>Active time</dt><dd>Where the working time of each model's sessions went, by share. Each moment counts once, using the order of the parts below.</dd></div>
+        </dl>
+        <h3>The parts of the Active time bar</h3>
+        <dl id="latencyLegend"></dl>
+      </div>
     </section>
 
     <section id="sessionsSection" class="sessions-section" aria-labelledby="sessionsTitle">
