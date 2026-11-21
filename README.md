@@ -194,7 +194,7 @@ Rates live in `rates.json` as USD per 1M input/output tokens. Claude defaults us
 - Manual run ingestion can include `claude_session_id` for exact session matching.
   Without it, runs are matched using time plus working-directory or transcript evidence.
 
-Run accounting checks with `.venv/bin/python -m unittest discover -s tests -v`.
+Run all checks with `.venv/bin/python -m unittest discover -s tests` and `node tests/test_frontend.cjs`. `tests/test_robustness.py` includes a seeded fuzz test that feeds randomly corrupted transcripts through the analysis and checks that every breakdown still adds up to its session span.
 
 ## Per-session all-Claude comparison
 

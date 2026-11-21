@@ -32,6 +32,9 @@ PROXY_LOG = Path(os.environ.get("COST_LENS_PROXY_LOG", BASE_DIR / "data" / "prox
 ALLOWED_UPSTREAMS = ("sambanova.ai", "anthropic.com")
 HOP_BY_HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te",
               "trailers", "transfer-encoding", "upgrade", "host", "content-length"}
+# Asked for uncompressed responses so streamed events can be timed as they pass.
+DROP_REQUEST = HOP_BY_HOP | {"accept-encoding"}
+MAX_BODY = 64 * 1024 * 1024
 STANDARD_USAGE = {"input_tokens", "output_tokens", "cache_read_input_tokens",
                   "cache_creation_input_tokens", "cache_creation", "server_tool_use",
                   "service_tier", "output_tokens_details", "inference_geo", "iterations",
@@ -72,13 +75,14 @@ class StreamTimer:
     def feed(self, chunk: bytes, at_ms: float) -> None:
         if self.first_byte_ms is None:
             self.first_byte_ms = at_ms
-        self.buffer += chunk
+        # Server-sent events may end lines with CRLF; normalize once both bytes have arrived.
+        self.buffer = (self.buffer + chunk).replace(b"\r\n", b"\n")
         while b"\n\n" in self.buffer:
             raw, self.buffer = self.buffer.split(b"\n\n", 1)
             self.event(raw, at_ms)
 
     def event(self, raw: bytes, at_ms: float) -> None:
-        data = b"".join(line[5:].strip() for line in raw.splitlines() if line.startswith(b"data:"))
+        data = b"\n".join(line[5:].strip() for line in raw.splitlines() if line.startswith(b"data:"))
         try:
             payload = json.loads(data) if data else None
         except ValueError:
@@ -160,13 +164,20 @@ def make_handler(log_path: Path, connect_to: tuple[str, int] | None = None,
                 self.send_error(404, "Use /via/<provider host>/... with a sambanova.ai or anthropic.com host")
                 return
             host, path = target
-            body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = -1
+            if not 0 <= length <= MAX_BODY or "chunked" in (self.headers.get("Transfer-Encoding") or "").lower():
+                self.send_error(400, "A Content-Length body up to 64 MB is required")
+                return
+            body = self.rfile.read(length)
             received = now_ms()
             try:
                 request_json = json.loads(body) if body else {}
             except ValueError:
                 request_json = {}
-            headers = {name: value for name, value in self.headers.items() if name.lower() not in HOP_BY_HOP}
+            headers = {name: value for name, value in self.headers.items() if name.lower() not in DROP_REQUEST}
             connection_class = http.client.HTTPSConnection if scheme == "https" else http.client.HTTPConnection
             kwargs: dict[str, Any] = {"timeout": 600}
             if scheme == "https":
@@ -181,12 +192,14 @@ def make_handler(log_path: Path, connect_to: tuple[str, int] | None = None,
                 "stream": bool(isinstance(request_json, dict) and request_json.get("stream")),
                 "request_bytes": len(body), "claude_session_id": self.headers.get(SESSION_HEADER),
             }
+            replied = False
             try:
                 connection.request(self.command, path, body=body or None, headers=headers)
                 sent = now_ms()
                 response = connection.getresponse()
                 headers_at = now_ms()
                 response_headers = response.getheaders()
+                replied = True
                 self.send_response(response.status, response.reason)
                 for name, value in response_headers:
                     if name.lower() not in HOP_BY_HOP:
@@ -197,9 +210,16 @@ def make_handler(log_path: Path, connect_to: tuple[str, int] | None = None,
                     self.end_headers()
                     while chunk := response.read1(65536):
                         timer.feed(chunk, now_ms())
-                        self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
-                        self.wfile.flush()
-                    self.wfile.write(b"0\r\n\r\n")
+                        try:
+                            self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
+                            self.wfile.flush()
+                        except OSError:
+                            # Claude Code hung up (interrupted): stop reading, keep what was timed.
+                            timer.error = "client_disconnected"
+                            self.close_connection = True
+                            break
+                    else:
+                        self.wfile.write(b"0\r\n\r\n")
                 else:
                     payload = response.read()
                     timer.first_byte_ms = now_ms()
@@ -222,11 +242,14 @@ def make_handler(log_path: Path, connect_to: tuple[str, int] | None = None,
                     "error": timer.error,
                 })
             except (OSError, http.client.HTTPException) as exc:
-                record.update({"status": None, "error": type(exc).__name__, "end_ms": now_ms()})
-                try:
-                    self.send_error(502, "Upstream request failed")
-                except OSError:
-                    pass
+                record.update({"status": None, "error": type(exc).__name__, "end_ms": now_ms(),
+                               "message_id": timer.message_id})
+                self.close_connection = True
+                if not replied:
+                    try:
+                        self.send_error(502, "Upstream request failed")
+                    except OSError:
+                        pass
             finally:
                 connection.close()
                 if record["path"].startswith("/v1/messages"):
@@ -235,13 +258,23 @@ def make_handler(log_path: Path, connect_to: tuple[str, int] | None = None,
     return Handler
 
 
+class ProxyServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        # Clients drop idle keep-alive connections all the time; that is not an error.
+        if isinstance(sys.exc_info()[1], ConnectionError):
+            return
+        super().handle_error(request, client_address)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--output", type=Path, default=PROXY_LOG)
     args = parser.parse_args(argv)
-    server = ThreadingHTTPServer((args.host, args.port), make_handler(args.output))
+    server = ProxyServer((args.host, args.port), make_handler(args.output))
     print(f"Cost Lens timing proxy on http://{args.host}:{args.port}/via/<provider host>")
     print(f"  export ANTHROPIC_BASE_URL=http://{args.host}:{args.port}/via/api.sambanova.ai")
     print(f"  records → {args.output}")

@@ -184,3 +184,86 @@ test('saved-session selection survives refresh, clears, and handles missing logs
   assert.equal(element('selectedSession').innerHTML, '');
   assert.equal(element('sessionPicker').value, '');
 });
+
+test('latency timeline survives malformed, empty and live data', async () => {
+  const elements = new Map();
+  const element = (id) => {
+    if (!elements.has(id)) elements.set(id, {
+      innerHTML: '', textContent: '', value: '', handlers: {}, setAttribute() {},
+      querySelectorAll: () => [], addEventListener(name, handler) { this.handlers[name] = handler; },
+    });
+    return elements.get(id);
+  };
+  const tokens = {input: 0, output: 0, cache_read: 0, cache_creation: 0, total: 0};
+  const context = vm.createContext({
+    document: {getElementById: element}, setInterval() {},
+    fetch: async () => ({ok: true, json: async () => ({
+      updated_at: '2026-11-22T00:00:00Z', totals: {claude_tokens: tokens, sambanova_tokens: tokens},
+      rates: {_verified_at: '2026-11-22', claude: {}, sambanova: {}}, sessions: [], session_index: [],
+      selected_session: null, latency_comparison: [],
+    })}),
+  });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../static/app.js'), 'utf8'), context);
+  await tick();
+  const run = (code, vars = {}) => { Object.assign(context, vars); return vm.runInContext(code, context); };
+  const CATS = ['generation', 'first_token', 'approval', 'tool', 'overhead', 'idle'];
+  const stream = (label, segments, extra = {}) => ({
+    label, request_count: 1, tool_count: 0, models: {}, approvals: {you: 0, 'auto-mode check': 0, rule: 0, unknown: 0},
+    tool_summary: [], requests: [], breakdown_ms: {}, ttft_p50_ms: null, tokens_per_s_p50: null,
+    timeline: {start_ms: 1e12, end_ms: 1e12 + 2e6, live: false, categories: CATS, labels: ['', 'Bash', '<img src=x onerror=alert(1)>'], segments},
+    ...extra,
+  });
+
+  // Collapsing a long idle gap keeps active time readable; the axis stays monotonic and bounded.
+  const lanes = [[{start: 0, end: 1000, category: 'tool'}, {start: 1000, end: 1e6, category: 'idle'},
+                  {start: 1e6, end: 1e6 + 1000, category: 'generation'}]];
+  const collapsed = run('buildAxis(L, 0, 1e6 + 1000, true)', {L: lanes});
+  const linear = run('buildAxis(L, 0, 1e6 + 1000, false)', {L: lanes});
+  assert(collapsed.x(1000) > 0.3 && collapsed.x(1e6) < 0.7, 'collapsed gap is a sliver');
+  assert(linear.x(1000) < 0.01, 'uncollapsed axis is proportional');
+  let previous = -1;
+  for (let t = -10; t <= 1e6 + 2000; t += 50000) { const x = collapsed.x(t); assert(x >= previous && x >= 0 && x <= 1); previous = x; }
+  const empty = run('buildAxis([], 5, 5, true)');
+  assert(Number.isFinite(empty.x(5)) && empty.x(5) >= 0 && empty.x(5) <= 1);
+
+  // Bad rows are dropped, labels are escaped, a missing main timeline does not throw.
+  const junkRows = [[0, 1000, 3, 2], [1000, -5, 3, 1], [NaN, 10, 0, 0], [2000, 10, 99, 0], 'row', [3000, 5000, 0, 1]];
+  const session = {id: 's', latency: {main: {...stream('Main agent', []), timeline: null},
+                                     subagents: [stream('Subagent · docs', junkRows)]}};
+  const html = run('timelineBox(S, "k1")', {S: session});
+  assert(html.includes('docs'));
+  assert(!html.includes('lat-undefined'));
+  assert(!html.includes('<img src=x'));
+  assert(html.includes('&lt;img src=x onerror=alert(1)&gt;'));
+  assert.equal(run('timelineBox({latency: {main: {timeline: null}, subagents: []}}, "k2")'), '');
+  assert.equal(run('timelineBox({latency: {main: {timeline: {start_ms: "x", end_ms: 1}}}}, "k3")'), '');
+
+  // Live: badge names the current phase, the window defaults to 15 minutes, idle subagents are noted.
+  const live = stream('Main agent', [[0, 2e6, 3, 1]], {current: 'tool'});
+  live.timeline.live = true;
+  const liveHtml = run('timelineBox(S, "k4")', {S: {id: 'l', latency: {main: live, subagents: [stream('Subagent · old', [[0, 1000, 3, 1]])]}}});
+  assert(liveHtml.includes('Live · now Running tools'));
+  assert(liveHtml.includes('value="900000" selected'));
+  assert(liveHtml.includes('1 subagent idle in this window'));
+  assert(liveHtml.includes('tl-now'));
+
+  // Changing the window is remembered per session.
+  const select = {dataset: {timelineKey: 'k4', timelineField: 'win'}, type: 'select-one', value: 'all',
+                  closest: () => ({querySelector: (q) => q === 'select' ? select : {checked: false}})};
+  run('onTimelineChange(E)', {E: {target: select}});
+  assert.equal(run('timelineViews.get("k4").win'), 'all');
+  assert.equal(run('timelineViews.get("k4").collapse'), false);
+  assert(run('timelineBox(S, "k4")', {S: {id: 'l', latency: {main: live, subagents: []}}}).includes('value="all" selected'));
+
+  // Zero active time: no fake bottleneck, missing request times render as a dash.
+  const quiet = stream('Main agent', [[0, 2e6, 5, 0]], {
+    requests: [{request_ms: null, end_ms: null, model: 'GLM-5.3', ttft_ms: null, ttft_measured: false,
+                generation_ms: null, output_tokens: 0, tokens_per_s: null, input_tokens: 0,
+                cache_read_tokens: 0, tools: [], tool_ms: 0, server: null}],
+  });
+  const box = run('latencyBox(S, "k5")', {S: {id: 'q', latency: {main: quiet, subagents: []}}});
+  assert(box.includes('No active time recorded'));
+  assert(box.includes('<b>—</b>'));
+  assert(!box.includes('1970'));
+  assert(box.includes('Server-side split not recorded'));
+});

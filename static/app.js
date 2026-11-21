@@ -129,7 +129,11 @@ const LATENCY_PARTS = [
   ["overhead", "Claude Code overhead", "Inside a turn but outside model and tool time: hooks, context assembly, retries"],
 ];
 
-function latencyBar(breakdown, label) {
+function timeOfDay(milliseconds) {
+  return Number.isFinite(milliseconds) ? new Date(milliseconds).toLocaleTimeString() : "—";
+}
+
+function latencyBar(breakdown = {}, label) {
   const active = LATENCY_PARTS.reduce((sum, [key]) => sum + (breakdown[key] || 0), 0);
   if (!active) return `<div class="latency-track"><span class="timing-unavailable">No active time recorded</span></div>`;
   const parts = LATENCY_PARTS.filter(([key]) => breakdown[key] > 0).map(([key, name]) => {
@@ -142,7 +146,7 @@ function latencyBar(breakdown, label) {
 
 function pctOf(breakdown, key) {
   const active = LATENCY_PARTS.reduce((sum, [part]) => sum + (breakdown[part] || 0), 0);
-  return active ? `${(breakdown[key] / active * 100).toFixed(0)}%` : "—";
+  return active ? `${((breakdown[key] || 0) / active * 100).toFixed(0)}%` : "—";
 }
 
 function rate(value) {
@@ -174,10 +178,12 @@ const WINDOWS = [["900000", "Last 15 min"], ["3600000", "Last hour"], ["21600000
 function laneSegments(stream) {
   const t = stream.timeline;
   if (!t) return [];
-  return t.segments.map(([offset, duration, category, label]) => ({
-    start: t.start_ms + offset, end: t.start_ms + offset + duration,
-    category: t.categories[category], label: t.labels[label] || "",
-  }));
+  return (t.segments || []).filter((row) => Array.isArray(row) && Number.isFinite(row[0]) && Number.isFinite(row[1])
+      && row[1] >= 0 && t.categories?.[row[2]] in PART_NAMES)
+    .map(([offset, duration, category, label]) => ({
+      start: t.start_ms + offset, end: t.start_ms + offset + duration,
+      category: t.categories[category], label: t.labels?.[label] || "",
+    }));
 }
 
 // Piecewise axis: active time at true scale, long all-idle gaps shrunk to a fixed sliver.
@@ -214,9 +220,10 @@ function buildAxis(lanes, from, to, collapse) {
 
 function timelineBox(session, disclosureKey) {
   const latency = session.latency;
-  const streams = [latency.main, ...latency.subagents].filter((stream) => stream.timeline);
+  const streams = [latency?.main, ...(latency?.subagents || [])].filter((stream) => stream?.timeline
+    && Number.isFinite(stream.timeline.start_ms) && Number.isFinite(stream.timeline.end_ms));
   if (!streams.length) return "";
-  const live = latency.main.timeline.live;
+  const live = Boolean(latency.main?.timeline?.live);
   const view = timelineViews.get(disclosureKey) || {win: live ? "900000" : "all", collapse: true};
   const end = Math.max(...streams.map((stream) => stream.timeline.end_ms));
   const sessionStart = Math.min(...streams.map((stream) => stream.timeline.start_ms));
@@ -235,14 +242,14 @@ function timelineBox(session, disclosureKey) {
       const title = `${PART_NAMES[seg.category]}${seg.label ? ` · ${seg.label}` : ""} · ${durationText(seg.end - seg.start)} · ${new Date(seg.start).toLocaleTimeString()}`;
       return `<span class="tl-seg lat-${seg.category}" style="left:${left.toFixed(3)}%;width:${width.toFixed(3)}%" title="${escapeHtml(title)}"></span>`;
     }).join("");
-    const current = stream.current ? `<em class="tl-now-state lat-text-${stream.current}">${escapeHtml(PART_NAMES[stream.current])}</em>` : "";
+    const current = PART_NAMES[stream.current] ? `<em class="tl-now-state lat-text-${stream.current}">${escapeHtml(PART_NAMES[stream.current])}</em>` : "";
     return `<div class="tl-lane"><span class="tl-label" title="${escapeHtml(stream.label)}">${escapeHtml(stream.label.replace(/^Subagent · /, "↳ "))}${current}</span><div class="tl-track">${spans}</div></div>`;
   }).join("");
   const gaps = axis.pieces.filter((piece) => piece.collapsed && piece.x1 - piece.x0 > 0.012)
     .map((piece) => `<span class="tl-gap" style="left:${(piece.x0 * 100).toFixed(3)}%;width:${((piece.x1 - piece.x0) * 100).toFixed(3)}%" title="${escapeHtml(`Idle ${durationText(piece.end - piece.start)}, collapsed`)}">${durationText(piece.end - piece.start).split(" ")[0]}</span>`).join("");
   const options = WINDOWS.map(([value, name]) => `<option value="${value}" ${view.win === value ? "selected" : ""}>${name}</option>`).join("");
   return `<div class="timeline-plot">
-    <div class="tl-head"><b>Timeline</b>${live ? `<span class="live-badge"><i aria-hidden="true"></i>Live · now ${escapeHtml(PART_NAMES[latency.main.current] || "idle")}</span>` : ""}
+    <div class="tl-head"><b>Timeline</b>${live ? `<span class="live-badge"><i aria-hidden="true"></i>Live · now ${escapeHtml(PART_NAMES[latency.main?.current] || "idle")}</span>` : ""}
       <label>Window <select data-timeline-key="${escapeHtml(disclosureKey)}" data-timeline-field="win">${options}</select></label>
       <label class="tl-check"><input type="checkbox" data-timeline-key="${escapeHtml(disclosureKey)}" data-timeline-field="collapse" ${view.collapse ? "checked" : ""}> Collapse idle gaps</label></div>
     <div class="tl-body" role="img" aria-label="${escapeHtml(`Timeline of ${streams.length} agent lanes from ${new Date(from).toLocaleString()} to ${new Date(end).toLocaleString()}`)}">${lanesHtml}
@@ -272,11 +279,11 @@ function latencyBox(session, disclosureKey) {
   const main = latency.main;
   const breakdown = main.breakdown_ms;
   const active = LATENCY_PARTS.reduce((sum, [key]) => sum + (breakdown[key] || 0), 0);
-  const bottleneck = LATENCY_PARTS.reduce((best, part) => (breakdown[part[0]] || 0) > (breakdown[best[0]] || 0) ? part : best);
+  const bottleneck = active > 0 ? LATENCY_PARTS.reduce((best, part) => (breakdown[part[0]] || 0) > (breakdown[best[0]] || 0) ? part : best) : [null, "—"];
   const approvals = main.approvals;
   const tools = main.tool_summary.map((tool) => `<tr><th scope="row">${escapeHtml(tool.name)}</th><td>${ints(tool.count)}</td><td>${durationText(tool.duration_ms)}</td><td>${durationText(tool.p50_ms)}</td><td>${durationText(tool.max_ms)}</td></tr>`).join("");
   const subagents = latency.subagents.map((agent) => `<div class="latency-agent"><div><b>${escapeHtml(agent.label)}</b><small>${agent.request_count} requests · ${agent.tool_count} tool calls · TTFT p50 ${durationText(agent.ttft_p50_ms)} · ${rate(agent.tokens_per_s_p50)}</small></div>${latencyBar(agent.breakdown_ms, agent.label)}</div>`).join("");
-  const requests = [...main.requests].reverse().map((request) => `<tr><td>${escapeHtml(new Date(request.request_ms || request.end_ms).toLocaleTimeString())}</td><td>${escapeHtml(request.model)}</td><td>${request.ttft_ms == null ? "—" : `${request.ttft_measured ? "" : "≤ "}${durationText(request.ttft_ms)}`}</td><td>${durationText(request.generation_ms)}</td><td>${ints(request.output_tokens)}</td><td>${rate(request.tokens_per_s)}</td><td>${request.input_tokens ? `${(request.cache_read_tokens / request.input_tokens * 100).toFixed(0)}%` : "—"}</td><td>${request.server ? `${durationText(request.server.upstream_ttft_ms)}${request.server.server_ttft_ms != null ? ` · server ${durationText(request.server.server_ttft_ms)}` : ""}` : "—"}</td><td>${request.tools.length ? `${escapeHtml(request.tools.join(", "))} · ${durationText(request.tool_ms)}` : "—"}</td></tr>`).join("");
+  const requests = [...(main.requests || [])].reverse().map((request) => `<tr><td>${escapeHtml(timeOfDay(request.request_ms ?? request.end_ms))}</td><td>${escapeHtml(request.model)}</td><td>${request.ttft_ms == null ? "—" : `${request.ttft_measured ? "" : "≤ "}${durationText(request.ttft_ms)}`}</td><td>${durationText(request.generation_ms)}</td><td>${ints(request.output_tokens)}</td><td>${rate(request.tokens_per_s)}</td><td>${request.input_tokens ? `${(request.cache_read_tokens / request.input_tokens * 100).toFixed(0)}%` : "—"}</td><td>${request.server ? `${durationText(request.server.upstream_ttft_ms)}${request.server.server_ttft_ms != null ? ` · server ${durationText(request.server.server_ttft_ms)}` : ""}` : "—"}</td><td>${request.tools.length ? `${escapeHtml(request.tools.join(", "))} · ${durationText(request.tool_ms)}` : "—"}</td></tr>`).join("");
   const openKey = `${disclosureKey}-latency`;
   return `<section class="latency-box" aria-label="Where the time went">
     <div class="timing-heading"><h3>Where the time went</h3><span>${durationText(active)} active · ${durationText(breakdown.idle)} idle between turns</span></div>
@@ -285,7 +292,7 @@ function latencyBox(session, disclosureKey) {
     <div class="tl-head"><b>Whole session</b><span class="subtle">Main agent active time by share</span></div>
     ${latencyBar(breakdown, "Main agent active time")}
     <div class="latency-stats">
-      <div><span>Bottleneck</span><b>${escapeHtml(bottleneck[1])}</b><small>${pctOf(breakdown, bottleneck[0])} of active time</small></div>
+      <div><span>Bottleneck</span><b>${escapeHtml(bottleneck[1])}</b><small>${bottleneck[0] ? `${pctOf(breakdown, bottleneck[0])} of active time` : "No active time recorded"}</small></div>
       <div><span>Time to first token</span><b>${durationText(main.ttft_p50_ms)}</b><small>p50 · p90 ${durationText(main.ttft_p90_ms)} · ${main.ttft_samples} measured</small></div>
       <div><span>Decode speed</span><b>${rate(main.tokens_per_s_p50)}</b><small>p50 output tokens per generating second</small></div>
       <div><span>Model requests</span><b>${ints(main.request_count)}</b><small>${Object.entries(main.models).map(([model, count]) => `${model} ${count}`).join(" · ")}</small></div>

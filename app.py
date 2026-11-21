@@ -10,7 +10,7 @@ from typing import Any
 from flask import Flask, jsonify, render_template, request
 
 from activity import claude_requests, opencode_steps, read_records
-from latency import percentile, session_latency, strip_samples
+from latency import clean, count, percentile, session_latency, strip_samples
 from timing import session_timing
 from provider_tracking import PROVIDER_LOG, load_provider_history
 
@@ -164,6 +164,7 @@ def unlogged_usage(streams: list[tuple[str, list[dict[str, Any]]]]) -> dict[str,
     logged as assistant messages. Only transcript usage written before the latest
     snapshot is compared, so the difference is a lower bound, never double-counted.
     """
+    streams = [(label, clean(records)) for label, records in streams]
     main = next((records for label, records in streams if label == "Main agent"), [])
     last = max((index for index, record in enumerate(main) if record.get("type") == "cost-state"),
                default=None)
@@ -174,14 +175,15 @@ def unlogged_usage(streams: list[tuple[str, list[dict[str, Any]]]]) -> dict[str,
         final: dict[str, dict[str, Any]] = {}
         for record in records[:last] if label == "Main agent" else records:
             message = record.get("message")
-            if record.get("type") == "assistant" and isinstance(message, dict) and message.get("usage") and message.get("id"):
+            if record.get("type") == "assistant" and isinstance(message, dict) \
+                    and isinstance(message.get("usage"), dict) and isinstance(message.get("id"), str):
                 final[message["id"]] = message
         for message in final.values():
             usage, totals = message["usage"], logged[str(message.get("model"))]
-            totals["input"] += int(usage.get("input_tokens") or 0)
-            totals["output"] += int(usage.get("output_tokens") or 0)
-            totals["cache_read"] += int(usage.get("cache_read_input_tokens") or 0)
-            totals["cache_creation"] += int(usage.get("cache_creation_input_tokens") or 0)
+            totals["input"] += count(usage.get("input_tokens"))
+            totals["output"] += count(usage.get("output_tokens"))
+            totals["cache_read"] += count(usage.get("cache_read_input_tokens"))
+            totals["cache_creation"] += count(usage.get("cache_creation_input_tokens"))
     models, cost = {}, {"claude": 0.0, "sambanova": 0.0}
     samba_models = set(RATES.get("sambanova", {})) - {"_default"}
     for model, reported in main[last]["modelUsage"].items():
@@ -189,10 +191,10 @@ def unlogged_usage(streams: list[tuple[str, list[dict[str, Any]]]]) -> dict[str,
             continue
         base = logged.get(model, {})
         extra = {
-            "input": max(0, int(reported.get("inputTokens") or 0) - base.get("input", 0)),
-            "output": max(0, int(reported.get("outputTokens") or 0) - base.get("output", 0)),
-            "cache_read": max(0, int(reported.get("cacheReadInputTokens") or 0) - base.get("cache_read", 0)),
-            "cache_creation": max(0, int(reported.get("cacheCreationInputTokens") or 0) - base.get("cache_creation", 0)),
+            "input": max(0, count(reported.get("inputTokens")) - base.get("input", 0)),
+            "output": max(0, count(reported.get("outputTokens")) - base.get("output", 0)),
+            "cache_read": max(0, count(reported.get("cacheReadInputTokens")) - base.get("cache_read", 0)),
+            "cache_creation": max(0, count(reported.get("cacheCreationInputTokens")) - base.get("cache_creation", 0)),
         }
         if not any(extra.values()):
             continue
@@ -225,7 +227,7 @@ def subagent_label(path: Path) -> str:
 def load_proxy_records(path: Path) -> dict[str, dict[str, Any]]:
     """Timing proxy records keyed by response message ID, the join key with transcripts."""
     return {record["message_id"]: record for record in read_records(path)
-            if isinstance(record.get("message_id"), str)}
+            if isinstance(record.get("message_id"), str) and record.get("upstream_sent_ms") is not None}
 
 
 def scan_claude_sessions() -> list[dict[str, Any]]:
