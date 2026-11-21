@@ -34,9 +34,14 @@ def endpoint_identity(environment: dict[str, str]) -> dict[str, str]:
             return {}
     except ValueError:
         return {}
+    source = "ANTHROPIC_BASE_URL"
+    # The local timing proxy names its upstream in the path: /via/<provider host>.
+    via = parsed.path.split("/")
+    if host in {"127.0.0.1", "localhost", "::1"} and len(via) > 2 and via[1] == "via" and via[2]:
+        host, source = via[2].lower().rstrip("."), "cost-lens-proxy"
     samba = host == "sambanova.ai" or host.endswith(".sambanova.ai")
     return {"provider": "sambanova" if samba else "claude", "endpoint_host": host,
-            "endpoint_source": "ANTHROPIC_BASE_URL"}
+            "endpoint_source": source}
 
 
 def record_endpoint(payload: dict[str, Any], environment: dict[str, str], path: Path) -> None:

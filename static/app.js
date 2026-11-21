@@ -149,6 +149,23 @@ function rate(value) {
   return value == null ? "—" : `${Math.round(value)} tok/s`;
 }
 
+function serverSplit(server) {
+  if (!server) return `<div class="server-split server-off"><b>Server-side split not recorded</b><span>First-token time above combines network, provider queue and prefill. To split it, run <code>python proxy.py</code> and start Claude Code with <code>ANTHROPIC_BASE_URL=http://127.0.0.1:8787/via/api.sambanova.ai</code>.</span></div>`;
+  const cells = [
+    ["Claude Code → proxy", server.client_ms_p50, "Request logged by Claude Code until it reached the local proxy"],
+    ["Upstream headers", server.upstream_headers_ms_p50, "Proxy sent the request until the provider's response headers arrived"],
+    ["Upstream first token", server.upstream_ttft_ms_p50, "Proxy sent the request until the first content token arrived"],
+    ["Server first token", server.server_ttft_ms_p50, "Provider-reported time_to_first_token"],
+    ["Queue", server.queue_ms_p50, "Provider-reported queue_time"],
+    ["Network + other", server.network_ms_p50, "Upstream first token minus server-reported first token"],
+    ["Upstream total", server.upstream_total_ms_p50, "Proxy sent the request until the response finished"],
+  ];
+  const reported = server.metric_names.length ? `Provider metrics seen: ${server.metric_names.join(", ")}` : "The provider reported no server-side timing fields, so server, queue and network show as not recorded";
+  return `<div class="server-split"><b>Server-side split · p50 of ${server.matched} proxied requests</b>
+    <div class="server-cells">${cells.map(([name, value, help]) => `<div title="${escapeHtml(help)}"><span>${name}</span><b>${durationText(value)}</b></div>`).join("")}</div>
+    <small>${escapeHtml(reported)}${server.header_names.length ? ` · timing headers: ${escapeHtml(server.header_names.join(", "))}` : ""}</small></div>`;
+}
+
 function latencyBox(session, disclosureKey) {
   const latency = session.latency;
   if (!latency) return "";
@@ -159,7 +176,7 @@ function latencyBox(session, disclosureKey) {
   const approvals = main.approvals;
   const tools = main.tool_summary.map((tool) => `<tr><th scope="row">${escapeHtml(tool.name)}</th><td>${ints(tool.count)}</td><td>${durationText(tool.duration_ms)}</td><td>${durationText(tool.p50_ms)}</td><td>${durationText(tool.max_ms)}</td></tr>`).join("");
   const subagents = latency.subagents.map((agent) => `<div class="latency-agent"><div><b>${escapeHtml(agent.label)}</b><small>${agent.request_count} requests · ${agent.tool_count} tool calls · TTFT p50 ${durationText(agent.ttft_p50_ms)} · ${rate(agent.tokens_per_s_p50)}</small></div>${latencyBar(agent.breakdown_ms, agent.label)}</div>`).join("");
-  const requests = [...main.requests].reverse().map((request) => `<tr><td>${escapeHtml(new Date(request.request_ms || request.end_ms).toLocaleTimeString())}</td><td>${escapeHtml(request.model)}</td><td>${request.ttft_ms == null ? "—" : `${request.ttft_measured ? "" : "≤ "}${durationText(request.ttft_ms)}`}</td><td>${durationText(request.generation_ms)}</td><td>${ints(request.output_tokens)}</td><td>${rate(request.tokens_per_s)}</td><td>${request.input_tokens ? `${(request.cache_read_tokens / request.input_tokens * 100).toFixed(0)}%` : "—"}</td><td>${request.tools.length ? `${escapeHtml(request.tools.join(", "))} · ${durationText(request.tool_ms)}` : "—"}</td></tr>`).join("");
+  const requests = [...main.requests].reverse().map((request) => `<tr><td>${escapeHtml(new Date(request.request_ms || request.end_ms).toLocaleTimeString())}</td><td>${escapeHtml(request.model)}</td><td>${request.ttft_ms == null ? "—" : `${request.ttft_measured ? "" : "≤ "}${durationText(request.ttft_ms)}`}</td><td>${durationText(request.generation_ms)}</td><td>${ints(request.output_tokens)}</td><td>${rate(request.tokens_per_s)}</td><td>${request.input_tokens ? `${(request.cache_read_tokens / request.input_tokens * 100).toFixed(0)}%` : "—"}</td><td>${request.server ? `${durationText(request.server.upstream_ttft_ms)}${request.server.server_ttft_ms != null ? ` · server ${durationText(request.server.server_ttft_ms)}` : ""}` : "—"}</td><td>${request.tools.length ? `${escapeHtml(request.tools.join(", "))} · ${durationText(request.tool_ms)}` : "—"}</td></tr>`).join("");
   const openKey = `${disclosureKey}-latency`;
   return `<section class="latency-box" aria-label="Where the time went">
     <div class="timing-heading"><h3>Where the time went</h3><span>${durationText(active)} active · ${durationText(breakdown.idle)} idle between turns</span></div>
@@ -172,10 +189,11 @@ function latencyBox(session, disclosureKey) {
       <div><span>Model requests</span><b>${ints(main.request_count)}</b><small>${Object.entries(main.models).map(([model, count]) => `${model} ${count}`).join(" · ")}</small></div>
       <div><span>Tool calls</span><b>${ints(main.tool_count)}</b><small>Approved by rule ${approvals.rule} · auto-mode ${approvals["auto-mode check"]} · you ${approvals.you}${main.tool_errors ? ` · ${main.tool_errors} errors` : ""}</small></div>
     </div>
+    ${serverSplit(main.server_side)}
     ${subagents ? `<div class="latency-agents"><h4>Subagents · run alongside the main agent</h4>${subagents}</div>` : ""}
     <details class="timing-details" data-disclosure="${escapeHtml(openKey)}" ${disclosureStates.get(openKey) ? "open" : ""}><summary>Tools, requests and how this is measured</summary>
       ${tools ? `<div class="table-scroll"><table class="latency-table"><thead><tr><th scope="col">Tool</th><th scope="col">Calls</th><th scope="col">Total</th><th scope="col">p50</th><th scope="col">Slowest</th></tr></thead><tbody>${tools}</tbody></table></div>` : ""}
-      <div class="table-scroll latency-requests" data-scroll="latency-${escapeHtml(disclosureKey)}"><table class="latency-table"><thead><tr><th scope="col">Sent</th><th scope="col">Model</th><th scope="col">First token</th><th scope="col">Generating</th><th scope="col">Output</th><th scope="col">Speed</th><th scope="col">Cached</th><th scope="col">Tools</th></tr></thead><tbody>${requests}</tbody></table></div>
+      <div class="table-scroll latency-requests" data-scroll="latency-${escapeHtml(disclosureKey)}"><table class="latency-table"><thead><tr><th scope="col">Sent</th><th scope="col">Model</th><th scope="col">First token</th><th scope="col">Generating</th><th scope="col">Output</th><th scope="col">Speed</th><th scope="col">Cached</th><th scope="col">Upstream first token</th><th scope="col">Tools</th></tr></thead><tbody>${requests}</tbody></table></div>
       <p class="timing-note">Measured by the client from Claude Code's own log timestamps; each instant counts once, using the order in the legend. Time to first token combines network, provider queue and prefill; Claude Code doesn't record the provider's server-side split. "≤" marks responses that began with text, where only an upper bound is known. Tool time includes auto-mode permission checks, which are model calls themselves. Totals per tool add overlapping calls; the bar does not.</p>
     </details>
   </section>`;

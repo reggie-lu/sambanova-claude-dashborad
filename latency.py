@@ -5,7 +5,8 @@ content block finishes (assistant records), how long thinking and tool-input blo
 streamed, when each tool result arrived, who approved it, and each turn's duration.
 That is enough to split wall-clock time into model wait, generation, tools, Claude
 Code overhead, and idle time. Server-side queue, prefill, and network time are not
-logged, so time to first token here is what the client observed: all three combined.
+logged, so time to first token here is what the client observed: all three combined,
+unless the local timing proxy (proxy.py) recorded the request, which adds the split.
 """
 from __future__ import annotations
 
@@ -50,7 +51,44 @@ def first_token_ms(block: dict[str, Any]) -> tuple[float | None, bool]:
     return finished, False
 
 
-def stream_requests(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+SERVER_SECONDS = {  # provider-reported timing, in seconds, by the names SambaNova documents
+    "server_ttft_ms": ("time_to_first_token",),
+    "queue_ms": ("queue_time",),
+    "server_total_ms": ("total_latency", "model_execution_time"),
+}
+
+
+def server_split(proxy: dict[str, Any], request_ms: float | None) -> dict[str, Any]:
+    """Proxy timestamps plus provider metrics → where first-token time was spent."""
+    sent = proxy.get("upstream_sent_ms")
+
+    def since(key: str) -> float | None:
+        value = proxy.get(key)
+        return value - sent if isinstance(value, (int, float)) and isinstance(sent, (int, float)) else None
+
+    split: dict[str, Any] = {
+        # Claude Code logs the request just after handing it off; tiny negatives are clock noise.
+        "client_ms": max(0.0, proxy["received_ms"] - request_ms)
+        if request_ms is not None and isinstance(proxy.get("received_ms"), (int, float)) else None,
+        "upstream_headers_ms": since("headers_ms"),
+        "upstream_ttft_ms": since("first_token_ms"),
+        "upstream_total_ms": since("end_ms"),
+    }
+    metrics = proxy.get("server_metrics") or {}
+    for key, names in SERVER_SECONDS.items():
+        value = next((metrics[name] for name in names if isinstance(metrics.get(name), (int, float))), None)
+        split[key] = value * 1000 if value is not None else None
+    if split["upstream_ttft_ms"] is not None and split["server_ttft_ms"] is not None:
+        split["network_ms"] = max(0.0, split["upstream_ttft_ms"] - split["server_ttft_ms"])
+    else:
+        split["network_ms"] = None
+    split["metrics"] = {key: value for key, value in metrics.items() if not key.startswith("header:")}
+    split["headers"] = {key[7:]: value for key, value in metrics.items() if key.startswith("header:")}
+    return split
+
+
+def stream_requests(records: list[dict[str, Any]],
+                    proxy: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     """One entry per model response, linked to the request that produced it."""
     sent = {record["id"]: timestamp_ms(record.get("timestamp"))
             for record in records if record.get("type") == "api-request" and record.get("id")}
@@ -97,6 +135,7 @@ def stream_requests(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "cache_read_tokens": int(item["usage"].get("cache_read_input_tokens") or 0),
             "tool_uses": [(block["id"], block["name"], timestamp_ms(block["record"].get("timestamp")))
                           for block in item["blocks"] if block["type"] == "tool_use" and block["id"]],
+            "server": server_split(proxy[item["id"]], request) if proxy and item["id"] in proxy else None,
         })
     for request in requests:
         # Decode speed needs a measured first token and enough span to be meaningful.
@@ -175,8 +214,23 @@ def partition(intervals: list[tuple[float, float, str]], span: tuple[float, floa
     return totals
 
 
-def stream_latency(records: list[dict[str, Any]], label: str) -> dict[str, Any]:
-    requests = stream_requests(records)
+def server_summary(requests: list[dict[str, Any]]) -> dict[str, Any] | None:
+    splits = [request["server"] for request in requests if request.get("server")]
+    if not splits:
+        return None
+    keys = ("client_ms", "upstream_headers_ms", "upstream_ttft_ms", "upstream_total_ms",
+            "server_ttft_ms", "queue_ms", "server_total_ms", "network_ms")
+    summary = {f"{key}_p50": percentile([split[key] for split in splits if split.get(key) is not None], 0.5)
+               for key in keys}
+    summary["matched"] = len(splits)
+    summary["metric_names"] = sorted({name for split in splits for name in split["metrics"]})
+    summary["header_names"] = sorted({name for split in splits for name in split["headers"]})
+    return summary
+
+
+def stream_latency(records: list[dict[str, Any]], label: str,
+                   proxy: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+    requests = stream_requests(records, proxy)
     results = tool_results(records)
     turns = turn_intervals(records)
     intervals: list[tuple[float, float, str]] = [(start, end, "overhead") for start, end in turns]
@@ -233,21 +287,22 @@ def stream_latency(records: list[dict[str, Any]], label: str) -> dict[str, Any]:
         "approvals": {kind: sum(1 for tool in tools if tool["approval"] == kind)
                       for kind in ("you", "auto-mode check", "rule", "unknown")},
         "tool_errors": sum(1 for tool in tools if tool["error"]),
+        "server_side": server_summary(requests),
         "requests": requests[-60:],
         "_samples": [(request["model"], request["ttft_ms"] if request["ttft_measured"] else None,
                       request["tokens_per_s"]) for request in requests],
     }
 
 
-def session_latency(streams: list[tuple[str, list[dict[str, Any]]]]) -> dict[str, Any] | None:
+def session_latency(streams: list[tuple[str, list[dict[str, Any]]]],
+                    proxy: dict[str, dict[str, Any]] | None = None) -> dict[str, Any] | None:
     """Main thread is the session's critical path; subagents are reported alongside it."""
-    results = [stream_latency(records, label) for label, records in streams if records]
+    results = [stream_latency(records, label, proxy) for label, records in streams if records]
     results = [result for result in results if result["request_count"]]
     if not results:
         return None
     main = next((result for result in results if result["label"] == "Main agent"), results[0])
-    return {"main": main, "subagents": [result for result in results if result is not main],
-            "server_side": None}
+    return {"main": main, "subagents": [result for result in results if result is not main]}
 
 
 def strip_samples(latency: dict[str, Any] | None) -> None:

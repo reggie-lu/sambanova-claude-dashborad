@@ -277,7 +277,31 @@ per generating second, only where the first token was measured. When a response 
 with text, only an upper bound on first-token time is known; these are marked "≤".
 
 Time to first token is client-observed: network, provider queue and prefill combined.
-Claude Code doesn't log the provider's server-side split, so that split isn't shown.
+Claude Code doesn't log the provider's server-side split; the timing proxy below adds it.
+
+### Server-side split with the timing proxy
+
+`proxy.py` (standard library only) sits between Claude Code and the provider:
+
+```bash
+.venv/bin/python proxy.py                      # listens on 127.0.0.1:8787
+export ANTHROPIC_BASE_URL="http://127.0.0.1:8787/via/api.sambanova.ai"
+claude
+```
+
+Requests and streamed responses pass through unchanged. For each `/v1/messages` call it
+appends a record to `data/proxy_requests.jsonl`: arrival, upstream response headers,
+first content token and end times, the response message ID (the join key with the
+transcript), token counts, and any server-side timing the provider reports in usage
+fields or headers (`time_to_first_token`, `queue_time`, `total_latency`, …). It never
+records API keys, prompts or response text, and only forwards to `sambanova.ai` and
+`anthropic.com` hosts. The endpoint hook reads the `/via/<host>` path, so proxied
+sessions keep their SambaNova attribution.
+
+Matched requests get a **Server-side split** in the session panel: Claude Code → proxy,
+upstream headers, upstream first token, server-reported first token and queue, and
+network (upstream first token minus server first token). Fields the provider doesn't
+report show as not recorded. Override the record path with `COST_LENS_PROXY_LOG`.
 
 ## Side requests not in the transcript
 

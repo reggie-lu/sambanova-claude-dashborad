@@ -25,6 +25,7 @@ SAMBANOVA_RUNS_PATH = Path(
     os.environ.get("SAMBANOVA_RUNS_PATH", BASE_DIR / "data" / "sambanova_runs.jsonl")
 )
 RATES_PATH = Path(os.environ.get("RATES_PATH", BASE_DIR / "rates.json"))
+PROXY_LOG_PATH = Path(os.environ.get("COST_LENS_PROXY_LOG", BASE_DIR / "data" / "proxy_requests.jsonl"))
 if LOG_BUNDLE:
     CLAUDE_PROJECTS_DIR = LOG_BUNDLE / "projects"
     SAMBANOVA_RUNS_PATH = LOG_BUNDLE / "sambanova_runs.jsonl"
@@ -221,8 +222,15 @@ def subagent_label(path: Path) -> str:
     return f"Subagent · {description}" if description else f"Subagent · {path.stem.removeprefix('agent-')[:8]}"
 
 
+def load_proxy_records(path: Path) -> dict[str, dict[str, Any]]:
+    """Timing proxy records keyed by response message ID, the join key with transcripts."""
+    return {record["message_id"]: record for record in read_records(path)
+            if isinstance(record.get("message_id"), str)}
+
+
 def scan_claude_sessions() -> list[dict[str, Any]]:
     provider_history = load_provider_history(PROVIDER_LOG)
+    proxy_records = load_proxy_records(PROXY_LOG_PATH)
     sessions: dict[str, dict[str, Any]] = {}
     records_by_session: defaultdict[str, list] = defaultdict(list)
     streams_by_session: defaultdict[str, list] = defaultdict(list)
@@ -291,7 +299,7 @@ def scan_claude_sessions() -> list[dict[str, Any]]:
                 "rate_fallback": model not in RATES.get("claude", {}),
             })
         session["events"].sort(key=lambda item: iso_to_epoch(item.get("timestamp")))
-        session["latency"] = session_latency(streams_by_session[session_id])
+        session["latency"] = session_latency(streams_by_session[session_id], proxy_records)
         session["unlogged_usage"] = unlogged_usage(streams_by_session[session_id])
         session["models"] = dict(session["models"])
         session["agents"] = dict(session["agents"])
@@ -592,6 +600,7 @@ def summarize(
             "sambanova_runs_path": str(SAMBANOVA_RUNS_PATH),
             "rates_path": str(RATES_PATH),
             "claude_provider_log": str(PROVIDER_LOG),
+            "proxy_log": str(PROXY_LOG_PATH),
         },
         "estimation": {
             "model": estimate_model,
