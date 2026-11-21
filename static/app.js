@@ -121,6 +121,80 @@ function timingBox(session, disclosureKey = session.id || "timing") {
   </section>`;
 }
 
+const LATENCY_PARTS = [
+  ["first_token", "Waiting for first token", "Request sent until the first token arrived: network, provider queue and prefill combined"],
+  ["generation", "Generating", "First token until the response finished streaming"],
+  ["tool", "Running tools", "Tool started until its result arrived; includes auto-mode permission checks"],
+  ["approval", "Waiting for your approval", "Tool calls you approved by hand, from request to result"],
+  ["overhead", "Claude Code overhead", "Inside a turn but outside model and tool time: hooks, context assembly, retries"],
+];
+
+function latencyBar(breakdown, label) {
+  const active = LATENCY_PARTS.reduce((sum, [key]) => sum + (breakdown[key] || 0), 0);
+  if (!active) return `<div class="latency-track"><span class="timing-unavailable">No active time recorded</span></div>`;
+  const parts = LATENCY_PARTS.filter(([key]) => breakdown[key] > 0).map(([key, name]) => {
+    const pct = breakdown[key] / active * 100;
+    return `<span class="lat-${key}" style="width:${pct.toFixed(3)}%" title="${escapeHtml(`${name}: ${durationText(breakdown[key])} (${pct.toFixed(1)}%)`)}"></span>`;
+  }).join("");
+  const description = LATENCY_PARTS.map(([key, name]) => `${name} ${durationText(breakdown[key] || 0)}`).join(", ");
+  return `<div class="latency-track" role="img" aria-label="${escapeHtml(`${label}: ${description}`)}">${parts}</div>`;
+}
+
+function pctOf(breakdown, key) {
+  const active = LATENCY_PARTS.reduce((sum, [part]) => sum + (breakdown[part] || 0), 0);
+  return active ? `${(breakdown[key] / active * 100).toFixed(0)}%` : "—";
+}
+
+function rate(value) {
+  return value == null ? "—" : `${Math.round(value)} tok/s`;
+}
+
+function latencyBox(session, disclosureKey) {
+  const latency = session.latency;
+  if (!latency) return "";
+  const main = latency.main;
+  const breakdown = main.breakdown_ms;
+  const active = LATENCY_PARTS.reduce((sum, [key]) => sum + (breakdown[key] || 0), 0);
+  const bottleneck = LATENCY_PARTS.reduce((best, part) => (breakdown[part[0]] || 0) > (breakdown[best[0]] || 0) ? part : best);
+  const approvals = main.approvals;
+  const tools = main.tool_summary.map((tool) => `<tr><th scope="row">${escapeHtml(tool.name)}</th><td>${ints(tool.count)}</td><td>${durationText(tool.duration_ms)}</td><td>${durationText(tool.p50_ms)}</td><td>${durationText(tool.max_ms)}</td></tr>`).join("");
+  const subagents = latency.subagents.map((agent) => `<div class="latency-agent"><div><b>${escapeHtml(agent.label)}</b><small>${agent.request_count} requests · ${agent.tool_count} tool calls · TTFT p50 ${durationText(agent.ttft_p50_ms)} · ${rate(agent.tokens_per_s_p50)}</small></div>${latencyBar(agent.breakdown_ms, agent.label)}</div>`).join("");
+  const requests = [...main.requests].reverse().map((request) => `<tr><td>${escapeHtml(new Date(request.request_ms || request.end_ms).toLocaleTimeString())}</td><td>${escapeHtml(request.model)}</td><td>${request.ttft_ms == null ? "—" : `${request.ttft_measured ? "" : "≤ "}${durationText(request.ttft_ms)}`}</td><td>${durationText(request.generation_ms)}</td><td>${ints(request.output_tokens)}</td><td>${rate(request.tokens_per_s)}</td><td>${request.input_tokens ? `${(request.cache_read_tokens / request.input_tokens * 100).toFixed(0)}%` : "—"}</td><td>${request.tools.length ? `${escapeHtml(request.tools.join(", "))} · ${durationText(request.tool_ms)}` : "—"}</td></tr>`).join("");
+  const openKey = `${disclosureKey}-latency`;
+  return `<section class="latency-box" aria-label="Where the time went">
+    <div class="timing-heading"><h3>Where the time went</h3><span>${durationText(active)} active · ${durationText(breakdown.idle)} idle between turns</span></div>
+    <div class="latency-legend">${LATENCY_PARTS.map(([key, name, help]) => `<span title="${escapeHtml(help)}"><i class="lat-dot lat-${key}" aria-hidden="true"></i>${name} <b>${durationText(breakdown[key] || 0)}</b> <small>${pctOf(breakdown, key)}</small></span>`).join("")}</div>
+    ${latencyBar(breakdown, "Main agent active time")}
+    <div class="latency-stats">
+      <div><span>Bottleneck</span><b>${escapeHtml(bottleneck[1])}</b><small>${pctOf(breakdown, bottleneck[0])} of active time</small></div>
+      <div><span>Time to first token</span><b>${durationText(main.ttft_p50_ms)}</b><small>p50 · p90 ${durationText(main.ttft_p90_ms)} · ${main.ttft_samples} measured</small></div>
+      <div><span>Decode speed</span><b>${rate(main.tokens_per_s_p50)}</b><small>p50 output tokens per generating second</small></div>
+      <div><span>Model requests</span><b>${ints(main.request_count)}</b><small>${Object.entries(main.models).map(([model, count]) => `${model} ${count}`).join(" · ")}</small></div>
+      <div><span>Tool calls</span><b>${ints(main.tool_count)}</b><small>Approved by rule ${approvals.rule} · auto-mode ${approvals["auto-mode check"]} · you ${approvals.you}${main.tool_errors ? ` · ${main.tool_errors} errors` : ""}</small></div>
+    </div>
+    ${subagents ? `<div class="latency-agents"><h4>Subagents · run alongside the main agent</h4>${subagents}</div>` : ""}
+    <details class="timing-details" data-disclosure="${escapeHtml(openKey)}" ${disclosureStates.get(openKey) ? "open" : ""}><summary>Tools, requests and how this is measured</summary>
+      ${tools ? `<div class="table-scroll"><table class="latency-table"><thead><tr><th scope="col">Tool</th><th scope="col">Calls</th><th scope="col">Total</th><th scope="col">p50</th><th scope="col">Slowest</th></tr></thead><tbody>${tools}</tbody></table></div>` : ""}
+      <div class="table-scroll latency-requests" data-scroll="latency-${escapeHtml(disclosureKey)}"><table class="latency-table"><thead><tr><th scope="col">Sent</th><th scope="col">Model</th><th scope="col">First token</th><th scope="col">Generating</th><th scope="col">Output</th><th scope="col">Speed</th><th scope="col">Cached</th><th scope="col">Tools</th></tr></thead><tbody>${requests}</tbody></table></div>
+      <p class="timing-note">Measured by the client from Claude Code's own log timestamps; each instant counts once, using the order in the legend. Time to first token combines network, provider queue and prefill; Claude Code doesn't record the provider's server-side split. "≤" marks responses that began with text, where only an upper bound is known. Tool time includes auto-mode permission checks, which are model calls themselves. Totals per tool add overlapping calls; the bar does not.</p>
+    </details>
+  </section>`;
+}
+
+function renderLatencyComparison(rows) {
+  const body = document.getElementById("latencyRows");
+  if (!body) return;
+  body.innerHTML = rows.map((row) => `<tr><th scope="row"><span class="provider-chip ${row.provider}">${row.provider === "sambanova" ? "SambaNova" : row.provider === "claude" ? "Claude" : "Other"}</span>${escapeHtml(row.model)}</th><td>${ints(row.requests)}<small> · ${row.sessions} sessions</small></td><td>${durationText(row.ttft_p50_ms)}</td><td>${durationText(row.ttft_p90_ms)}</td><td>${rate(row.tokens_per_s_p50)}</td><td class="latency-share">${latencyBar(row.breakdown_ms, row.model)}<small>Model wait ${pctOf(row.breakdown_ms, "first_token")} · generating ${pctOf(row.breakdown_ms, "generation")} · tools ${pctOf(row.breakdown_ms, "tool")}</small></td></tr>`).join("")
+    || '<tr><td colspan="6" class="empty">No timed model requests yet.</td></tr>';
+}
+
+function unloggedNote(session) {
+  const unlogged = session.unlogged_usage;
+  if (!unlogged) return "";
+  const models = Object.entries(unlogged.models).map(([model, usage]) => `${model}: ${ints(usage.input)} in · ${ints(usage.output)} out · ${money(usage.cost)}`).join("; ");
+  return `<div class="unlogged-note"><b>+${money(unlogged.total_cost)} in side requests not in the transcript</b><span>Claude Code's own usage total includes requests it never writes to the transcript: auto-mode permission checks, titles and recaps. ${escapeHtml(models)}. A lower bound from its latest snapshot; not included in the costs above.</span></div>`;
+}
+
 function toolRows(tools = []) {
   return tools.map((tool) => `<li><b>${escapeHtml(tool.name)}</b>
     <span>${escapeHtml(tool.detail)}</span>${tool.status ? `<small>${escapeHtml(tool.status)}${tool.timing?.duration_ms != null ? ` · Tool execution ${durationText(tool.timing.duration_ms)}` : ""}</small>` : ""}</li>`).join("");
@@ -222,7 +296,9 @@ function renderSessions(sessions, containerId = "sessions") {
         <div class="all-claude-card"><span class="provider-label"><img src="/static/claude-icon.png" alt="" width="18" height="18">If all usage ran on Claude</span><strong>${money(comparison.all_claude_cost)}</strong><small>Estimated · ${escapeHtml(comparison.model)}</small></div>
       </div>
       ${comparisonSummary(comparison)}
+      ${unloggedNote(session)}
       ${timingBox(session, detailKey)}
+      ${latencyBox(session, detailKey)}
       <details class="request-details" data-disclosure="${escapeHtml(detailKey)}-requests" ${disclosureStates.get(`${detailKey}-requests`) ? "open" : ""}><summary>Explore tokens & requests<span class="summary-hint">${session.events.length + sambaEvents.length} recorded model requests</span></summary>
       <div class="session-context"><p>${escapeHtml(session.cwd || "unknown cwd")}</p><p>Session ${escapeHtml(session.id)}</p>${providerNote ? `<p>${escapeHtml(providerNote)}</p>` : ""}</div>
       <div class="session-meta"><span>Claude fresh in ${ints(session.claude.input)}</span><span>Out ${ints(session.claude.output)}</span><span>Cache read ${ints(session.claude.cache_read)}</span><span>Cache write ${ints(session.claude.cache_creation)}</span></div>
@@ -297,6 +373,7 @@ async function refresh() {
     setText("totalTokens", ints(totals.claude_tokens.total + totals.sambanova_tokens.total));
     setText("modelLabel", `Comparison: ${(totals.comparison_models || []).join(", ") || totals.dominant_claude_model}`);
     renderRates(data);
+    renderLatencyComparison(data.latency_comparison || []);
     latestSessions = data.sessions;
     renderRecentSessions();
     renderSessionBrowser(data);

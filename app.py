@@ -10,6 +10,7 @@ from typing import Any
 from flask import Flask, jsonify, render_template, request
 
 from activity import claude_requests, opencode_steps, read_records
+from latency import percentile, session_latency, strip_samples
 from timing import session_timing
 from provider_tracking import PROVIDER_LOG, load_provider_history
 
@@ -155,13 +156,82 @@ def content_text(content: Any) -> str:
     return ""
 
 
+def unlogged_usage(streams: list[tuple[str, list[dict[str, Any]]]]) -> dict[str, Any] | None:
+    """Usage Claude Code reports in its `cost-state` snapshot beyond what the transcript holds.
+
+    Side requests (auto-mode permission checks, titles, recaps) are billed but never
+    logged as assistant messages. Only transcript usage written before the latest
+    snapshot is compared, so the difference is a lower bound, never double-counted.
+    """
+    main = next((records for label, records in streams if label == "Main agent"), [])
+    last = max((index for index, record in enumerate(main) if record.get("type") == "cost-state"),
+               default=None)
+    if last is None or not isinstance(main[last].get("modelUsage"), dict):
+        return None
+    logged: defaultdict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for label, records in streams:
+        final: dict[str, dict[str, Any]] = {}
+        for record in records[:last] if label == "Main agent" else records:
+            message = record.get("message")
+            if record.get("type") == "assistant" and isinstance(message, dict) and message.get("usage") and message.get("id"):
+                final[message["id"]] = message
+        for message in final.values():
+            usage, totals = message["usage"], logged[str(message.get("model"))]
+            totals["input"] += int(usage.get("input_tokens") or 0)
+            totals["output"] += int(usage.get("output_tokens") or 0)
+            totals["cache_read"] += int(usage.get("cache_read_input_tokens") or 0)
+            totals["cache_creation"] += int(usage.get("cache_creation_input_tokens") or 0)
+    models, cost = {}, {"claude": 0.0, "sambanova": 0.0}
+    samba_models = set(RATES.get("sambanova", {})) - {"_default"}
+    for model, reported in main[last]["modelUsage"].items():
+        if not isinstance(reported, dict):
+            continue
+        base = logged.get(model, {})
+        extra = {
+            "input": max(0, int(reported.get("inputTokens") or 0) - base.get("input", 0)),
+            "output": max(0, int(reported.get("outputTokens") or 0) - base.get("output", 0)),
+            "cache_read": max(0, int(reported.get("cacheReadInputTokens") or 0) - base.get("cache_read", 0)),
+            "cache_creation": max(0, int(reported.get("cacheCreationInputTokens") or 0) - base.get("cache_creation", 0)),
+        }
+        if not any(extra.values()):
+            continue
+        if model in samba_models:
+            # SambaNova input_tokens already include cache reads and writes.
+            run = {"model": model, "input_tokens": max(0, extra["input"] - extra["cache_read"] - extra["cache_creation"]),
+                   "output_tokens": extra["output"], "cache_read_tokens": extra["cache_read"],
+                   "cache_write_tokens": extra["cache_creation"]}
+            extra["cost"], provider = sambanova_run_cost(run), "sambanova"
+        else:
+            extra["cost"] = claude_usage_cost(normalize_claude_model(model), {
+                "input_tokens": extra["input"], "output_tokens": extra["output"],
+                "cache_read_input_tokens": extra["cache_read"],
+                "cache_creation_input_tokens": extra["cache_creation"]})
+            provider = "claude"
+        extra["provider"] = provider
+        cost[provider] += extra["cost"]
+        models[model] = extra
+    if not models:
+        return None
+    return {"models": models, "cost": cost, "total_cost": cost["claude"] + cost["sambanova"]}
+
+
+def subagent_label(path: Path) -> str:
+    meta = load_json(path.with_suffix(".meta.json"), {})
+    description = meta.get("description") if isinstance(meta, dict) else None
+    return f"Subagent · {description}" if description else f"Subagent · {path.stem.removeprefix('agent-')[:8]}"
+
+
 def scan_claude_sessions() -> list[dict[str, Any]]:
     provider_history = load_provider_history(PROVIDER_LOG)
     sessions: dict[str, dict[str, Any]] = {}
     records_by_session: defaultdict[str, list] = defaultdict(list)
+    streams_by_session: defaultdict[str, list] = defaultdict(list)
     for path in CLAUDE_PROJECTS_DIR.rglob("*.jsonl"):
-        session_id = path.stem if path.parent.name != "subagents" else path.parent.parent.name
-        records_by_session[session_id].extend(read_records(path))
+        subagent = path.parent.name == "subagents"
+        session_id = path.stem if not subagent else path.parent.parent.name
+        records = read_records(path)
+        records_by_session[session_id].extend(records)
+        streams_by_session[session_id].append((subagent_label(path) if subagent else "Main agent", records))
     for session_id, records in records_by_session.items():
         session = {
             "id": session_id, "cwd": "", "started_at": "", "updated_at": "",
@@ -221,6 +291,8 @@ def scan_claude_sessions() -> list[dict[str, Any]]:
                 "rate_fallback": model not in RATES.get("claude", {}),
             })
         session["events"].sort(key=lambda item: iso_to_epoch(item.get("timestamp")))
+        session["latency"] = session_latency(streams_by_session[session_id])
+        session["unlogged_usage"] = unlogged_usage(streams_by_session[session_id])
         session["models"] = dict(session["models"])
         session["agents"] = dict(session["agents"])
         sessions[session_id] = session
@@ -411,6 +483,44 @@ def session_cost_comparison(session: dict[str, Any], fallback_model: str) -> dic
     }
 
 
+def latency_comparison(sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Pool request latency by model; wall-clock shares come from each session's main agent."""
+    samba_models = {event["model"] for session in sessions
+                    for event in session.get("direct_sambanova_events", [])}
+    groups: dict[str, dict[str, Any]] = {}
+    for session in sessions:
+        latency = session.get("latency")
+        for stream in [latency["main"], *latency["subagents"]] if latency else []:
+            for model, ttft, speed in stream["_samples"]:
+                group = groups.setdefault(model, {
+                    "model": model, "requests": 0, "sessions": set(), "ttft": [], "speeds": [],
+                    "breakdown_ms": defaultdict(float),
+                    "provider": "sambanova" if model in samba_models or model in RATES.get("sambanova", {})
+                                else "claude" if model.startswith("claude") else "unknown",
+                })
+                group["requests"] += 1
+                group["sessions"].add(session["id"])
+                if ttft is not None:
+                    group["ttft"].append(ttft)
+                if speed:
+                    group["speeds"].append(speed)
+        if latency and latency["main"]["models"]:
+            dominant = max(latency["main"]["models"].items(), key=lambda item: item[1])[0]
+            for key, value in latency["main"]["breakdown_ms"].items():
+                groups[dominant]["breakdown_ms"][key] += value
+    rows = []
+    for group in groups.values():
+        rows.append({
+            "model": group["model"], "provider": group["provider"], "requests": group["requests"],
+            "sessions": len(group["sessions"]),
+            "ttft_p50_ms": percentile(group["ttft"], 0.5), "ttft_p90_ms": percentile(group["ttft"], 0.9),
+            "ttft_samples": len(group["ttft"]),
+            "tokens_per_s_p50": percentile(group["speeds"], 0.5),
+            "breakdown_ms": dict(group["breakdown_ms"]),
+        })
+    return sorted(rows, key=lambda row: (row["provider"] != "sambanova", -row["requests"]))
+
+
 def summarize(
     estimate_model: str = "MiniMax-M2.7", selected_session_id: str | None = None
 ) -> dict[str, Any]:
@@ -464,6 +574,9 @@ def summarize(
     savings = all_claude_cost - hybrid_cost
     savings_pct = (savings / all_claude_cost * 100) if all_claude_cost > 0 else 0.0
     timeline = build_timeline(claude_sessions, samba_runs, dominant_claude_model)
+    latency_rows = latency_comparison(claude_sessions)
+    for session in claude_sessions:
+        strip_samples(session.get("latency"))
     saved_sessions = [s for s in claude_sessions if s["events"] or s["matched_sambanova_runs"]]
     selected_session = next((s for s in saved_sessions if s["id"] == selected_session_id), None)
 
@@ -508,6 +621,7 @@ def summarize(
         "selected_session_missing": bool(selected_session_id and selected_session is None),
         "sambanova_runs": samba_runs[:50],
         "timeline": timeline,
+        "latency_comparison": latency_rows,
         "rates": RATES,
     }
 

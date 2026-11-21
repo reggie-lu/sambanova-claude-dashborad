@@ -256,6 +256,37 @@ the activity list shows its own duration. These sums may include overlapping cal
 Neither session spans nor `/code` response spans represent prefill, decoding, or
 exclusive model computation time.
 
+## Latency breakdown
+
+Each session has a **Where the time went** panel, and **Latency by model** compares
+models across all sessions. Everything comes from timestamps Claude Code already
+writes, so it works the same for SambaNova-backed and Claude-backed sessions:
+
+| Part | Measured from |
+| --- | --- |
+| Waiting for first token | `api-request` sent → first token (finished block minus `thinkingDurationMs` / `toolInputStreamMs`) |
+| Generating | First token → last response block |
+| Running tools | `tool_use` block → its `tool_result`, including auto-mode permission checks |
+| Waiting for your approval | Tool calls whose `permissionDecision` came from you |
+| Claude Code overhead | Remaining time inside a turn (`turn_duration`) |
+| Idle | Time between turns |
+
+Overlapping intervals count once, in that priority order, so the parts add up to the
+session span. Subagents are listed beside the main agent. Decode speed is output tokens
+per generating second, only where the first token was measured. When a response starts
+with text, only an upper bound on first-token time is known; these are marked "≤".
+
+Time to first token is client-observed: network, provider queue and prefill combined.
+Claude Code doesn't log the provider's server-side split, so that split isn't shown.
+
+## Side requests not in the transcript
+
+Claude Code also bills requests it never writes as transcript messages: auto-mode
+permission checks, session titles and recaps. Its `cost-state` snapshot records total
+usage per model. Each session card compares that snapshot with transcript usage logged
+before it and shows the difference as a separate, lower-bound cost; it is not added to
+the totals.
+
 ## Logs from another VM
 
 Open **Remote logs → Working on another machine?** in the dashboard for copyable

@@ -12,7 +12,7 @@
   <a class="skip-link" href="#sessionsSection">Skip to sessions</a>
   <header class="topbar"><div class="nav-inner">
     <a class="app-brand" href="#"><img src="/static/sambanova-icon.png" alt="" width="32" height="32"><span>SambaNova <b>Cost Lens</b></span></a>
-    <nav aria-label="Main navigation"><a href="#options">The two setups</a><a href="#sessionsSection">Your sessions</a><a href="#remoteLogs">Remote logs</a><a href="#pricing">Pricing</a></nav>
+    <nav aria-label="Main navigation"><a href="#options">The two setups</a><a href="#latency">Latency</a><a href="#sessionsSection">Your sessions</a><a href="#remoteLogs">Remote logs</a><a href="#pricing">Pricing</a></nav>
     <div class="status"><span class="pulse" aria-hidden="true"></span><span id="updated" role="status">Connecting to local logs…</span></div>
   </div></header>
   <main class="shell">
@@ -71,6 +71,12 @@
         <article><span>Tokens processed</span><strong id="totalTokens">—</strong><small id="modelLabel">Input, output and cache usage</small></article>
       </div>
       <p class="accounting-caption">A token-cost comparison, not a subscription bill. Estimates preserve recorded cache usage; another model may use different tokens or produce different results.</p>
+    </section>
+
+    <section id="latency" class="panel latency-panel" aria-labelledby="latencyTitle">
+      <div class="section-heading"><div><p class="eyebrow">WHERE THE TIME GOES</p><h2 id="latencyTitle">Latency by model</h2></div><span class="scope-label">All recorded sessions · client-side</span></div>
+      <p class="subtle">Every model request across your sessions, grouped by model. Time to first token is measured from the request being sent and includes network, queue and prefill. The bar shows each model's share of active session time, by its sessions' main agent.</p>
+      <div class="table-scroll"><table class="latency-table"><thead><tr><th scope="col">Model</th><th scope="col">Requests</th><th scope="col">First token p50</th><th scope="col">First token p90</th><th scope="col">Decode p50</th><th scope="col">Active time</th></tr></thead><tbody id="latencyRows"></tbody></table></div>
     </section>
 
     <section id="sessionsSection" class="sessions-section" aria-labelledby="sessionsTitle">
