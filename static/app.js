@@ -270,6 +270,7 @@ function onTimelineChange(event) {
   if (event.target.type === "checkbox") view.win = event.target.closest(".timeline-plot").querySelector("select").value;
   else view.collapse = event.target.closest(".timeline-plot").querySelector("input[type=checkbox]").checked;
   timelineViews.set(key, view);
+  event.target.blur?.();  // release focus so the redraw below is not skipped
   rerenderSessions();
 }
 
@@ -394,6 +395,10 @@ function renderSessions(sessions, containerId = "sessions") {
   const container = document.getElementById(containerId);
   const signature = JSON.stringify(sessions);
   if (renderedSessions.get(containerId) === signature && container.innerHTML) return;
+  // Live sessions change on every poll; rebuilding now would destroy a control the user
+  // is still choosing in (an open dropdown snaps shut). Skip; the next poll catches up.
+  const active = document.activeElement;
+  if (active && container.contains?.(active) && active.matches?.("select, input")) return;
   container.querySelectorAll("[data-scroll]").forEach((el) => scrollPositions.set(el.dataset.scroll, el.scrollTop));
   container.querySelectorAll("[data-disclosure]").forEach((el) => disclosureStates.set(el.dataset.disclosure, el.open));
   renderedSessions.set(containerId, signature);

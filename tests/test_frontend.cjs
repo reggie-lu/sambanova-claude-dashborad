@@ -255,6 +255,15 @@ test('latency timeline survives malformed, empty and live data', async () => {
   assert.equal(run('timelineViews.get("k4").collapse'), false);
   assert(run('timelineBox(S, "k4")', {S: {id: 'l', latency: {main: live, subagents: []}}}).includes('value="all" selected'));
 
+  // A refresh never rebuilds a card while one of its controls is focused (an open dropdown would close).
+  const container = element('sessions');
+  container.innerHTML = 'kept';
+  container.contains = () => true;
+  context.document.activeElement = {matches: (selector) => selector.includes('select')};
+  run('renderSessions(L, "sessions")', {L: [{id: 'x'}]});
+  assert.equal(container.innerHTML, 'kept');
+  context.document.activeElement = null;
+
   // Zero active time: no fake bottleneck, missing request times render as a dash.
   const quiet = stream('Main agent', [[0, 2e6, 5, 0]], {
     requests: [{request_ms: null, end_ms: null, model: 'GLM-5.3', ttft_ms: null, ttft_measured: false,
