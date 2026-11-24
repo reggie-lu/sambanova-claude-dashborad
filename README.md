@@ -266,13 +266,44 @@ writes, so it works the same for SambaNova-backed and Claude-backed sessions:
 | --- | --- |
 | Waiting for first token | `api-request` sent → first token (finished block minus `thinkingDurationMs` / `toolInputStreamMs`) |
 | Generating | First token → last response block |
-| Running tools | `tool_use` block → its `tool_result`, including auto-mode permission checks |
 | Waiting for your approval | Tool calls whose `permissionDecision` came from you |
+| Auto-mode check + run | Tool calls cleared by auto mode's safety classifier (`reasonType: classifier`), `tool_use` → `tool_result` |
+| Running tools | Tool calls that skipped the check (allowed by a rule or the permission mode): the command's own run time |
 | Claude Code overhead | Remaining time inside a turn (`turn_duration`) |
 | Idle | Time between turns |
 
 Overlapping intervals count once, in that priority order, so the parts add up to the
 session span.
+
+**Why the auto-mode check is its own part.** In auto mode, Claude Code asks a model
+whether each command is safe before running it. That classifier call is a full model
+request (first-token wait plus generation) on the session's provider, and Claude Code
+doesn't write it to the transcript. With a slow first token, it dominates tool time:
+in one GLM-5.3 session, auto-checked calls took 18.8 s p50 while calls of the same tools
+allowed by a rule took 44 ms. The transcript alone can't tell the check apart from the
+command's run, so the part is labeled "check + run", and the **Auto-mode check** stat
+compares checked calls with calls of the same tools that skipped the check. Under the
+timing proxy below, the classifier requests are logged, so the check is timed exactly
+(proxied requests with no matching transcript response, inside the tool call) and the
+rest of the call counts as Running tools. Allowing common safe commands in
+`.claude/settings.json` skips the check for them.
+
+On SambaNova, Claude Code first asks for Claude Sonnet 5 for the check, gets a 404 and
+falls back to the session model. With GLM-5.3 that is slow (about 400–2,100 reasoning
+tokens per check) and, with anything suspicious in context, every check hits the output
+cap without a verdict, so auto mode blocks even harmless commands. Point the check at a
+fast model instead:
+
+```bash
+export CLAUDE_CODE_AUTO_MODE_MODEL=gemma-4-31B-it
+```
+
+Two scripts compare check models through the timing proxy:
+
+- `scripts/check_requests.py --since <UTC time>`: main-loop and check requests per model,
+  with time and output tokens.
+- `scripts/safety_report.py --since <UTC time> [--until <UTC time>]`: scores a run of the
+  auto-mode safety test (harmless controls must be allowed, risky steps blocked).
 
 The **Timeline** draws those parts at their real times as horizontal bars, one lane for
 the main agent and one for each subagent active in the window. Hover a segment for its

@@ -64,7 +64,8 @@ class LatencyTests(unittest.TestCase):
         breakdown = result["breakdown_ms"]
         self.assertEqual(breakdown["first_token"], 2000 + 1500 - 0)  # 1-3 s, and 10.5-12 s bounded
         self.assertEqual(breakdown["generation"], 3000)
-        self.assertEqual(breakdown["tool"], 4000)
+        self.assertEqual(breakdown["auto_check"], 4000)  # Bash cleared by auto mode: check + run
+        self.assertEqual(breakdown["tool"], 0)
         self.assertEqual(breakdown["overhead"], 1000 + 500)  # 0-1 s and 10-10.5 s inside the turn
         self.assertEqual(breakdown["idle"], 30000)  # after the turn until the next prompt
         self.assertEqual(sum(breakdown.values()), result["span_ms"])
@@ -75,6 +76,7 @@ class LatencyTests(unittest.TestCase):
         result = stream_latency(records, "Main agent")
         self.assertEqual(result["breakdown_ms"]["approval"], 4000)
         self.assertEqual(result["breakdown_ms"]["tool"], 0)
+        self.assertEqual(result["breakdown_ms"]["auto_check"], 0)
         self.assertEqual(result["approvals"]["you"], 1)
 
     def test_turns_fall_back_to_prompts_when_durations_are_missing(self):
@@ -85,7 +87,7 @@ class LatencyTests(unittest.TestCase):
 
     def test_overlapping_categories_follow_priority(self):
         totals = partition([(0, 10, "tool"), (5, 8, "generation"), (0, 20, "overhead")], (0, 30))
-        self.assertEqual(totals, {"generation": 3, "first_token": 0, "approval": 0,
+        self.assertEqual(totals, {"generation": 3, "first_token": 0, "approval": 0, "auto_check": 0,
                                   "tool": 7, "overhead": 10, "idle": 10})
 
     def test_segments_follow_time_order_with_labels_and_cover_the_span(self):
@@ -94,7 +96,7 @@ class LatencyTests(unittest.TestCase):
         parts = [(t["categories"][category], t["labels"][label], duration)
                  for _, duration, category, label in t["segments"]]
         self.assertEqual(parts[:5], [("overhead", "", 1000), ("first_token", "GLM-5.3", 2000),
-                                     ("generation", "GLM-5.3", 3000), ("tool", "Bash", 4000),
+                                     ("generation", "GLM-5.3", 3000), ("auto_check", "Bash", 4000),
                                      ("overhead", "", 500)])
         self.assertEqual(parts[-1], ("idle", "", 30000))
         self.assertEqual(sum(duration for _, duration, _, _ in t["segments"]), result["span_ms"])
@@ -117,6 +119,67 @@ class LatencyTests(unittest.TestCase):
         self.assertEqual(latency["main"]["label"], "Main agent")
         self.assertEqual([agent["label"] for agent in latency["subagents"]], ["Subagent · docs"])
         self.assertIsNone(session_latency([("Main agent", [])]))
+
+
+def proxied(message_id, start, end, session_id=None):
+    return {message_id: {"message_id": message_id, "received_ms": _ms(start), "end_ms": _ms(end),
+                         "upstream_sent_ms": _ms(start), "claude_session_id": session_id}}
+
+
+class AutoModeCheckTests(unittest.TestCase):
+    def test_tools_allowed_by_a_rule_are_pure_running_time(self):
+        records = session()
+        records[4] = tool_result(10, "t1", {"source": "config", "reasonType": "mode"})
+        breakdown = stream_latency(records, "Main agent")["breakdown_ms"]
+        self.assertEqual((breakdown["tool"], breakdown["auto_check"]), (4000, 0))
+
+    def test_proxy_times_the_check_and_leaves_the_rest_as_running(self):
+        # The classifier request ran 6.2-9 s inside the 6-10 s tool interval.
+        result = stream_latency(session(), "Main agent", proxied("classifier", 6.2, 9))
+        self.assertEqual(result["breakdown_ms"]["auto_check"], 2800)
+        self.assertEqual(result["breakdown_ms"]["tool"], 1200)
+        summary = result["auto_check"]
+        self.assertEqual((summary["measured"], summary["check_p50_ms"]), (1, 2800))
+        t = result["timeline"]
+        labels = [(t["categories"][c], t["labels"][l]) for _, _, c, l in t["segments"]]
+        self.assertIn(("auto_check", "auto-mode check"), labels)
+
+    def test_proxy_checks_are_clipped_to_the_tool_interval(self):
+        result = stream_latency(session(), "Main agent", proxied("classifier", 5.5, 30))
+        self.assertEqual(result["breakdown_ms"]["auto_check"], 4000)
+        self.assertEqual(result["breakdown_ms"]["tool"], 0)
+        self.assertEqual(sum(result["breakdown_ms"].values()), result["span_ms"])
+
+    def test_logged_responses_and_other_sessions_are_not_checks(self):
+        records = [dict(record, sessionId="s1") for record in session()]
+        proxy = {**proxied("m1", 6.5, 7.5), **proxied("other", 6.5, 7.5, session_id="s2")}
+        result = stream_latency(records, "Main agent", proxy)
+        self.assertEqual(result["breakdown_ms"]["auto_check"], 4000)  # unmeasured: check + run
+        self.assertEqual(result["auto_check"]["measured"], 0)
+
+    def test_summary_compares_checked_calls_with_same_tools_that_skipped_it(self):
+        records = session()[:-2] + [
+            {"type": "api-request", "id": "r3", "timestamp": at(13)},
+            assistant(14, {"type": "tool_use", "id": "t2", "name": "Bash"}, request="r3", message="m3"),
+            tool_result(14.1, "t2", {"source": "config", "reasonType": "mode"}),
+            assistant(15, {"type": "tool_use", "id": "t3", "name": "Edit"}, request="r3", message="m4"),
+            tool_result(15.1, "t3", {"source": "config", "reasonType": "mode"}),
+        ]
+        summary = stream_latency(records, "Main agent")["auto_check"]
+        self.assertEqual((summary["checked"], summary["checked_p50_ms"]), (1, 4000))
+        self.assertEqual((summary["unchecked"], summary["unchecked_p50_ms"]), (1, 100))  # Edit not compared
+        self.assertIsNone(summary["check_p50_ms"])
+
+    def test_no_auto_checked_calls_means_no_summary(self):
+        records = session()
+        records[4] = tool_result(10, "t1", {"source": "user_temporary"})
+        self.assertIsNone(stream_latency(records, "Main agent")["auto_check"])
+
+    def test_junk_proxy_records_are_ignored(self):
+        proxy = {"a": None, "b": {"received_ms": "x", "end_ms": 5}, "c": {"received_ms": 9e12, "end_ms": 1},
+                 "d": {"received_ms": True, "end_ms": float("nan")}}
+        result = stream_latency(session(), "Main agent", proxy)
+        self.assertEqual(result["breakdown_ms"]["auto_check"], 4000)
 
 
 class UnloggedUsageTests(unittest.TestCase):

@@ -294,6 +294,7 @@ footer a { text-decoration: none; color: #706479; }
 /* Latency breakdown */
 .lat-first_token { background: #d9a03f; }.lat-generation { background: #8c59d4; }.lat-tool { background: #3f8f70; }
 .lat-approval { background: #d0567c; }.lat-overhead { background: #9a9fae; }
+.lat-auto_check { background: #3d7cc9; }.lat-text-auto_check { color: #2a62a8; }
 .latency-box { margin: 18px 0 14px; padding-top: 16px; border-top: 1px solid var(--line); }
 .latency-legend { display: flex; flex-wrap: wrap; gap: 8px 20px; font-size: 10px; margin-bottom: 8px; }
 .latency-legend > span { display: flex; align-items: center; gap: 6px; cursor: help; }

@@ -124,7 +124,8 @@ function timingBox(session, disclosureKey = session.id || "timing") {
 const LATENCY_PARTS = [
   ["first_token", "Waiting for first token", "Request sent until the first token arrived: network, provider queue and prefill combined"],
   ["generation", "Generating", "First token until the response finished streaming"],
-  ["tool", "Running tools", "Tool started until its result arrived; includes auto-mode permission checks"],
+  ["auto_check", "Auto-mode check + run", "Tool calls cleared by auto mode's safety classifier, which is an extra model request before the command runs. Claude Code doesn't log when the check ends, so this is the check and the run together, unless the timing proxy timed the check exactly"],
+  ["tool", "Running tools", "Tools that ran without a safety check (allowed by a rule or your permission mode), from call to result: the command's own run time"],
   ["approval", "Waiting for your approval", "Tool calls you approved by hand, from request to result"],
   ["overhead", "Claude Code overhead", "Inside a turn but outside model and tool time: hooks, context assembly, retries"],
 ];
@@ -274,6 +275,16 @@ function onTimelineChange(event) {
   rerenderSessions();
 }
 
+function autoCheckStat(check) {
+  if (!check) return "";
+  const measured = check.measured
+    ? `the check alone p50 ${durationText(check.check_p50_ms)}, timed by the proxy on ${ints(check.measured)} calls`
+    : check.unchecked
+      ? `same tools without the check: ${durationText(check.unchecked_p50_ms)} p50 (${ints(check.unchecked)} calls)`
+      : "no unchecked calls of the same tools to compare";
+  return `<div title="Auto mode asks a model whether each command is safe before running it. That request isn't in Claude Code's log; the timing proxy can time it."><span>Auto-mode check</span><b>${durationText(check.checked_p50_ms)}</b><small>p50 per checked call, check + run · ${ints(check.checked)} calls · ${measured}</small></div>`;
+}
+
 function latencyBox(session, disclosureKey) {
   const latency = session.latency;
   if (!latency) return "";
@@ -298,13 +309,14 @@ function latencyBox(session, disclosureKey) {
       <div><span>Decode speed</span><b>${rate(main.tokens_per_s_p50)}</b><small>p50 output tokens per generating second</small></div>
       <div><span>Model requests</span><b>${ints(main.request_count)}</b><small>${Object.entries(main.models).map(([model, count]) => `${model} ${count}`).join(" · ")}</small></div>
       <div><span>Tool calls</span><b>${ints(main.tool_count)}</b><small>Approved by rule ${approvals.rule} · auto-mode ${approvals["auto-mode check"]} · you ${approvals.you}${main.tool_errors ? ` · ${main.tool_errors} errors` : ""}</small></div>
+      ${autoCheckStat(main.auto_check)}
     </div>
     ${serverSplit(main.server_side)}
     ${subagents ? `<div class="latency-agents"><h4>Subagents · run alongside the main agent</h4>${subagents}</div>` : ""}
     <details class="timing-details" data-disclosure="${escapeHtml(openKey)}" ${disclosureStates.get(openKey) ? "open" : ""}><summary>Tools, requests and how this is measured</summary>
       ${tools ? `<div class="table-scroll"><table class="latency-table"><thead><tr><th scope="col">Tool</th><th scope="col">Calls</th><th scope="col">Total</th><th scope="col">p50</th><th scope="col">Slowest</th></tr></thead><tbody>${tools}</tbody></table></div>` : ""}
       <div class="table-scroll latency-requests" data-scroll="latency-${escapeHtml(disclosureKey)}"><table class="latency-table"><thead><tr><th scope="col">Sent</th><th scope="col">Model</th><th scope="col">First token</th><th scope="col">Generating</th><th scope="col">Output</th><th scope="col">Speed</th><th scope="col">Cached</th><th scope="col">Upstream first token</th><th scope="col">Tools</th></tr></thead><tbody>${requests}</tbody></table></div>
-      <p class="timing-note">Measured by the client from Claude Code's own log timestamps; each instant counts once, using the order in the legend. Time to first token combines network, provider queue and prefill; Claude Code doesn't record the provider's server-side split. "≤" marks responses that began with text, where only an upper bound is known. Tool time includes auto-mode permission checks, which are model calls themselves. Totals per tool add overlapping calls; the bar does not.</p>
+      <p class="timing-note">Measured by the client from Claude Code's own log timestamps; each instant counts once, using the order in the legend. Time to first token combines network, provider queue and prefill; Claude Code doesn't record the provider's server-side split. "≤" marks responses that began with text, where only an upper bound is known. "Running tools" is pure command time; calls cleared by auto mode's safety classifier are shown apart, because that check is a model request Claude Code doesn't log. Run the timing proxy to time the check on its own. Totals per tool add overlapping calls; the bar does not.</p>
     </details>
   </section>`;
 }

@@ -206,7 +206,7 @@ test('latency timeline survives malformed, empty and live data', async () => {
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../static/app.js'), 'utf8'), context);
   await tick();
   const run = (code, vars = {}) => { Object.assign(context, vars); return vm.runInContext(code, context); };
-  const CATS = ['generation', 'first_token', 'approval', 'tool', 'overhead', 'idle'];
+  const CATS = ['generation', 'first_token', 'approval', 'auto_check', 'tool', 'overhead', 'idle'];
   const stream = (label, segments, extra = {}) => ({
     label, request_count: 1, tool_count: 0, models: {}, approvals: {you: 0, 'auto-mode check': 0, rule: 0, unknown: 0},
     tool_summary: [], requests: [], breakdown_ms: {}, ttft_p50_ms: null, tokens_per_s_p50: null,
@@ -236,6 +236,16 @@ test('latency timeline survives malformed, empty and live data', async () => {
   assert(!html.includes('<img src=x'));
   assert(html.includes('&lt;img src=x onerror=alert(1)&gt;'));
   assert.equal(run('timelineBox({latency: {main: {timeline: null}, subagents: []}}, "k2")'), '');
+  // Auto-mode check: its own part in the legend and a stat comparing checked and unchecked calls.
+  assert.equal(run('autoCheckStat(null)'), '');
+  const estimated = run('autoCheckStat(C)', {C: {checked: 839, checked_p50_ms: 21900, unchecked: 130, unchecked_p50_ms: 100, measured: 0}});
+  assert(estimated.includes('839 calls') && estimated.includes('without the check'), estimated);
+  const timed = run('autoCheckStat(C)', {C: {checked: 3, checked_p50_ms: 9000, unchecked: 0, measured: 3, check_p50_ms: 7000}});
+  assert(timed.includes('timed by the proxy'), timed);
+  const checkBox = run('latencyBox(S, "k9")', {S: {id: 's', latency: {subagents: [], main: {...stream('Main agent', [[0, 4000, 3, 1]]),
+    breakdown_ms: {auto_check: 4000, tool: 1000, idle: 0}, auto_check: {checked: 1, checked_p50_ms: 4000, unchecked: 0, measured: 0}}}}});
+  assert(checkBox.includes('Auto-mode check + run') && checkBox.includes('lat-auto_check'), 'new part rendered');
+  assert(checkBox.includes('Bottleneck</span><b>Auto-mode check + run'), 'check can be the bottleneck');
   assert.equal(run('timelineBox({latency: {main: {timeline: {start_ms: "x", end_ms: 1}}}}, "k3")'), '');
 
   // Live: badge names the current phase, the window defaults to 15 minutes, idle subagents are noted.

@@ -4,7 +4,8 @@ Claude Code logs when each API request is sent (`api-request`), when each respon
 content block finishes (assistant records), how long thinking and tool-input blocks
 streamed, when each tool result arrived, who approved it, and each turn's duration.
 That is enough to split wall-clock time into model wait, generation, tools, Claude
-Code overhead, and idle time. Server-side queue, prefill, and network time are not
+Code overhead, and idle time. Tool calls cleared by auto mode's safety classifier
+are kept apart ("auto_check"), since the classifier is itself a model request. Server-side queue, prefill, and network time are not
 logged, so time to first token here is what the client observed: all three combined,
 unless the local timing proxy (proxy.py) recorded the request, which adds the split.
 """
@@ -16,7 +17,11 @@ from typing import Any
 from timing import timestamp_ms
 
 # Higher priority wins where intervals overlap, so every instant counts once.
-CATEGORIES = ["generation", "first_token", "approval", "tool", "overhead", "idle"]
+# "auto_check": a tool call cleared by auto mode's safety classifier. The classifier is
+# an extra model request Claude Code does not log, so without the timing proxy the
+# check and the command's own run are one interval; with it, the check is timed exactly
+# and the rest of the interval stays "tool".
+CATEGORIES = ["generation", "first_token", "approval", "auto_check", "tool", "overhead", "idle"]
 PRIORITY = {name: index for index, name in enumerate(CATEGORIES)}
 
 
@@ -326,6 +331,47 @@ def server_summary(requests: list[dict[str, Any]]) -> dict[str, Any] | None:
     return summary
 
 
+def side_requests(records: list[dict[str, Any]],
+                  proxy: dict[str, dict[str, Any]] | None) -> list[tuple[float, float]]:
+    """Proxied requests with no response in this transcript (the classifier and other
+    side calls), as (start, end), limited to this session when the proxy saw its ID."""
+    if not proxy:
+        return []
+    logged = {message["id"] for record in records if record.get("type") == "assistant"
+              if isinstance(message := record.get("message"), dict) and isinstance(message.get("id"), str)}
+    sessions = {record["sessionId"] for record in records if isinstance(record.get("sessionId"), str)}
+    calls = []
+    for message_id, request in proxy.items():
+        if message_id in logged or not isinstance(request, dict):
+            continue
+        owner = request.get("claude_session_id")
+        if owner and sessions and owner not in sessions:
+            continue
+        start, end = duration(request.get("received_ms")), duration(request.get("end_ms"))
+        if start is not None and end is not None and end >= start:
+            calls.append((start, end))
+    return sorted(calls)
+
+
+def check_summary(tools: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Auto-checked tool calls next to calls of the same tools that skipped the check:
+    the gap between the two is roughly what the safety check costs per call."""
+    checked = [tool for tool in tools if tool["approval"] == "auto-mode check"]
+    if not checked:
+        return None
+    names = {tool["name"] for tool in checked}
+    unchecked = [tool for tool in tools if tool["name"] in names and tool["approval"] == "rule"]
+
+    def p50(items: list[dict[str, Any]], key: str = "duration_ms") -> float | None:
+        return percentile([item[key] for item in items if item.get(key) is not None], 0.5)
+
+    measured = [tool for tool in checked if tool.get("check_ms") is not None]
+    return {"checked": len(checked), "checked_p50_ms": p50(checked),
+            "unchecked": len(unchecked), "unchecked_p50_ms": p50(unchecked),
+            "measured": len(measured), "check_p50_ms": p50(measured, "check_ms"),
+            "check_total_ms": sum(tool["check_ms"] for tool in measured)}
+
+
 def stream_latency(records: list[dict[str, Any]], label: str,
                    proxy: dict[str, dict[str, Any]] | None = None,
                    now_ms: float | None = None) -> dict[str, Any]:
@@ -342,6 +388,8 @@ def stream_latency(records: list[dict[str, Any]], label: str,
         span = (span[0], now_ms)
     tools: list[dict[str, Any]] = []
     seen_tools: set[str] = set()
+    side_calls = [(start, end) for start, end in side_requests(records, proxy)
+                  if span and start < span[1] and end > span[0]]
     for request in requests:
         request["tool_uses"] = [use for use in request["tool_uses"]
                                 if use[0] not in seen_tools and not seen_tools.add(use[0])]
@@ -354,10 +402,25 @@ def stream_latency(records: list[dict[str, Any]], label: str,
             ended = result.get("end_ms")
             duration = ended - started if ended is not None and started is not None and ended >= started else None
             approved = approval_kind(result.get("approval", {}))
-            tools.append({"name": name or "tool", "duration_ms": duration, "approval": approved,
-                          "error": result.get("error", False)})
-            if duration is not None:
-                intervals.append((started, ended, "approval" if approved == "you" else "tool", name or "tool"))
+            tool = {"name": name or "tool", "duration_ms": duration, "approval": approved,
+                    "error": result.get("error", False), "check_ms": None}
+            tools.append(tool)
+            if duration is None:
+                continue
+            if approved == "you":
+                intervals.append((started, ended, "approval", tool["name"]))
+            elif approved != "auto-mode check":
+                intervals.append((started, ended, "tool", tool["name"]))
+            else:
+                checks = [(max(start, started), min(end, ended)) for start, end in side_calls
+                          if start < ended and end > started]
+                if checks:  # timed by the proxy: the check itself, then the command
+                    intervals.append((started, ended, "tool", tool["name"]))
+                    intervals += [(start, end, "auto_check", "auto-mode check") for start, end in checks]
+                    tool["check_ms"] = partition([(start, end, "auto_check") for start, end in checks],
+                                                 (started, ended))["auto_check"]
+                else:
+                    intervals.append((started, ended, "auto_check", tool["name"]))
         request["tools"] = [tool["name"] for tool in tools[-len(request["tool_uses"]):]] if request["tool_uses"] else []
         request["tool_ms"] = sum(tool["duration_ms"] or 0 for tool in tools[-len(request["tool_uses"]):]) if request["tool_uses"] else 0
         del request["tool_uses"]
@@ -397,6 +460,7 @@ def stream_latency(records: list[dict[str, Any]], label: str,
         "approvals": {kind: sum(1 for tool in tools if tool["approval"] == kind)
                       for kind in ("you", "auto-mode check", "rule", "unknown")},
         "tool_errors": sum(1 for tool in tools if tool["error"]),
+        "auto_check": check_summary(tools),
         "server_side": server_summary(requests),
         "requests": requests[-60:],
         "_samples": [(request["model"], request["ttft_ms"] if request["ttft_measured"] else None,
