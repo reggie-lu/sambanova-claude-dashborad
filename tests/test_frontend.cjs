@@ -244,15 +244,31 @@ test('latency timeline survives malformed, empty and live data', async () => {
   assert(timed.includes('timed by the proxy'), timed);
   const checkBox = run('latencyBox(S, "k9")', {S: {id: 's', latency: {subagents: [], main: {...stream('Main agent', [[0, 4000, 3, 1]]),
     breakdown_ms: {auto_check: 4000, tool: 1000, idle: 0}, auto_check: {checked: 1, checked_p50_ms: 4000, unchecked: 0, measured: 0}}}}});
-  assert(checkBox.includes('Auto-mode check + run') && checkBox.includes('lat-auto_check'), 'new part rendered');
-  assert(checkBox.includes('Bottleneck</span><b>Auto-mode check + run'), 'check can be the bottleneck');
+  // Tool calls are one part, call to result; checked time is a darker share inside it, not a part of its own.
+  assert(checkBox.includes('lat-auto_check'), 'checked share drawn inside tool calls');
+  assert(!checkBox.includes('Auto-mode check + run') && !checkBox.includes('Running tools'), 'no separate parts');
+  assert(checkBox.includes('Tool calls <b>5.0 s</b>') || checkBox.includes('Tool calls <b>5 s</b>'), checkBox.match(/Tool calls <b>[^<]*/)?.[0]);
+  assert(checkBox.includes('of which auto-checked 80%'), 'share of tool time that waited for a check');
+  assert(checkBox.includes('Bottleneck</span><b>Tool calls'), 'tool calls as a whole can be the bottleneck');
+  const proxied = run('latencyBox(S, "k10")', {S: {id: 's', latency: {subagents: [], main: {...stream('Main agent', []),
+    breakdown_ms: {auto_check: 3000, tool: 1000, generation: 500}, auto_check: {checked: 1, checked_p50_ms: 4000, unchecked: 0, measured: 1, check_p50_ms: 3000}}}}});
+  assert(proxied.includes('of which auto-mode check 75%'), 'with the proxy the share is the check itself');
+  assert.equal(run('pctOf(B, "tool")', {B: {auto_check: 3000, tool: 1000}}), '100%');
+  assert.equal(run('checkShare({tool: 1000}, false)'), '');
+  assert.equal(run('checkBreakdown(null)'), '');
+  const hint = run('checkBreakdown(C)', {C: {checked: 4, checked_p50_ms: 15000, measured: 0}});
+  assert(hint.includes('timing proxy') && hint.includes('4 tool calls'), hint);
+  const split = run('checkBreakdown(C)', {C: {checked: 1, measured: 1, run_p50_ms: 1200, run_total_ms: 1200,
+    by_model: [{model: 'gemma-4-31B-it', tool_calls: 1, requests: 2, request_p50_ms: 1800, output_tokens_p50: 9, check_p50_ms: 2800, check_total_ms: 2800}]}});
+  assert(split.includes('gemma-4-31B-it') && split.includes('1 extra') && split.includes('Running the command'), split);
+  assert(run('autoCheckStat(C)', {C: {checked: 1, checked_p50_ms: 4000, measured: 1, check_p50_ms: 2800, by_model: [{model: 'gemma-4-31B-it'}]}}).includes('(gemma-4-31B-it)'));
   assert.equal(run('timelineBox({latency: {main: {timeline: {start_ms: "x", end_ms: 1}}}}, "k3")'), '');
 
   // Live: badge names the current phase, the window defaults to 15 minutes, idle subagents are noted.
   const live = stream('Main agent', [[0, 2e6, 3, 1]], {current: 'tool'});
   live.timeline.live = true;
   const liveHtml = run('timelineBox(S, "k4")', {S: {id: 'l', latency: {main: live, subagents: [stream('Subagent · old', [[0, 1000, 3, 1]])]}}});
-  assert(liveHtml.includes('Live · now Running tools'));
+  assert(liveHtml.includes('Live · now Tool calls'));
   assert(liveHtml.includes('value="900000" selected'));
   assert(liveHtml.includes('1 subagent idle in this window'));
   assert(liveHtml.includes('tl-now'));

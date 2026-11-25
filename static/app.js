@@ -124,8 +124,7 @@ function timingBox(session, disclosureKey = session.id || "timing") {
 const LATENCY_PARTS = [
   ["first_token", "Waiting for first token", "Request sent until the first token arrived: network, provider queue and prefill combined"],
   ["generation", "Generating", "First token until the response finished streaming"],
-  ["auto_check", "Auto-mode check + run", "Tool calls cleared by auto mode's safety classifier, which is an extra model request before the command runs. Claude Code doesn't log when the check ends, so this is the check and the run together, unless the timing proxy timed the check exactly"],
-  ["tool", "Running tools", "Tools that ran without a safety check (allowed by a rule or your permission mode), from call to result: the command's own run time"],
+  ["tool", "Tool calls", "From the tool call until its result came back: auto mode's safety check, when there is one, plus the command itself. The darker share is the check: exact with the timing proxy, otherwise the whole of each checked call"],
   ["approval", "Waiting for your approval", "Tool calls you approved by hand, from request to result"],
   ["overhead", "Claude Code overhead", "Inside a turn but outside model and tool time: hooks, context assembly, retries"],
 ];
@@ -134,20 +133,36 @@ function timeOfDay(milliseconds) {
   return Number.isFinite(milliseconds) ? new Date(milliseconds).toLocaleTimeString() : "—";
 }
 
+// Tool calls run from call to result; auto-checked time ("auto_check") is a share inside them.
+function partMs(breakdown = {}, key) {
+  return key === "tool" ? (breakdown.tool || 0) + (breakdown.auto_check || 0) : (breakdown[key] || 0);
+}
+
+function activeMs(breakdown = {}) {
+  return LATENCY_PARTS.reduce((sum, [key]) => sum + partMs(breakdown, key), 0);
+}
+
+function checkShare(breakdown = {}, measured) {
+  const tools = partMs(breakdown, "tool");
+  if (!(breakdown.auto_check > 0) || !tools) return "";
+  return ` <small class="check-share" title="${measured ? "The safety check itself, timed by the proxy" : "Whole tool calls that waited for auto mode's safety check (check + run); the timing proxy splits out the check itself"}">of which ${measured ? "auto-mode check" : "auto-checked"} ${Math.round(breakdown.auto_check / tools * 100)}%</small>`;
+}
+
 function latencyBar(breakdown = {}, label) {
-  const active = LATENCY_PARTS.reduce((sum, [key]) => sum + (breakdown[key] || 0), 0);
+  const active = activeMs(breakdown);
   if (!active) return `<div class="latency-track"><span class="timing-unavailable">No active time recorded</span></div>`;
-  const parts = LATENCY_PARTS.filter(([key]) => breakdown[key] > 0).map(([key, name]) => {
-    const pct = breakdown[key] / active * 100;
-    return `<span class="lat-${key}" style="width:${pct.toFixed(3)}%" title="${escapeHtml(`${name}: ${durationText(breakdown[key])} (${pct.toFixed(1)}%)`)}"></span>`;
-  }).join("");
-  const description = LATENCY_PARTS.map(([key, name]) => `${name} ${durationText(breakdown[key] || 0)}`).join(", ");
+  const span = (key, ms, title) => ms > 0
+    ? `<span class="lat-${key}" style="width:${(ms / active * 100).toFixed(3)}%" title="${escapeHtml(`${title}: ${durationText(ms)} (${(ms / active * 100).toFixed(1)}%)`)}"></span>` : "";
+  const parts = LATENCY_PARTS.map(([key, name]) => key === "tool"
+    ? span("auto_check", breakdown.auto_check || 0, `${name} · auto-checked`) + span("tool", breakdown.tool || 0, name)
+    : span(key, breakdown[key] || 0, name)).join("");
+  const description = LATENCY_PARTS.map(([key, name]) => `${name} ${durationText(partMs(breakdown, key))}`).join(", ");
   return `<div class="latency-track" role="img" aria-label="${escapeHtml(`${label}: ${description}`)}">${parts}</div>`;
 }
 
 function pctOf(breakdown, key) {
-  const active = LATENCY_PARTS.reduce((sum, [part]) => sum + (breakdown[part] || 0), 0);
-  return active ? `${((breakdown[key] || 0) / active * 100).toFixed(0)}%` : "—";
+  const active = activeMs(breakdown);
+  return active ? `${(partMs(breakdown, key) / active * 100).toFixed(0)}%` : "—";
 }
 
 function rate(value) {
@@ -173,7 +188,8 @@ function serverSplit(server) {
 
 const timelineViews = new Map();
 const lastRendered = new Map();
-const PART_NAMES = Object.fromEntries([...LATENCY_PARTS.map(([key, name]) => [key, name]), ["idle", "Idle"]]);
+const PART_NAMES = Object.fromEntries([...LATENCY_PARTS.map(([key, name]) => [key, name]),
+  ["auto_check", "Tool call (auto-checked)"], ["idle", "Idle"]]);
 const WINDOWS = [["900000", "Last 15 min"], ["3600000", "Last hour"], ["21600000", "Last 6 hours"], ["all", "Whole session"]];
 
 function laneSegments(stream) {
@@ -277,12 +293,26 @@ function onTimelineChange(event) {
 
 function autoCheckStat(check) {
   if (!check) return "";
+  const models = (check.by_model || []).map((row) => row.model).join(", ");
   const measured = check.measured
-    ? `the check alone p50 ${durationText(check.check_p50_ms)}, timed by the proxy on ${ints(check.measured)} calls`
+    ? `the check alone p50 ${durationText(check.check_p50_ms)}${models ? ` (${escapeHtml(models)})` : ""}, timed by the proxy on ${ints(check.measured)} calls`
     : check.unchecked
       ? `same tools without the check: ${durationText(check.unchecked_p50_ms)} p50 (${ints(check.unchecked)} calls)`
       : "no unchecked calls of the same tools to compare";
-  return `<div title="Auto mode asks a model whether each command is safe before running it. That request isn't in Claude Code's log; the timing proxy can time it."><span>Auto-mode check</span><b>${durationText(check.checked_p50_ms)}</b><small>p50 per checked call, check + run · ${ints(check.checked)} calls · ${measured}</small></div>`;
+  return `<div title="Auto mode asks a model whether each command is safe before running it. That request isn't in Claude Code's log; the timing proxy can time it."><span>Auto-mode check</span><b>${durationText(check.checked_p50_ms)}</b><small>p50 per checked tool call, call to result · ${ints(check.checked)} calls · ${measured}</small></div>`;
+}
+
+// Inside auto-checked tool calls: the safety check per check model, then the command itself.
+function checkBreakdown(check) {
+  if (!check) return "";
+  if (!check.measured) {
+    return `<div class="check-breakdown"><h4>Inside tool calls</h4><p class="subtle">${ints(check.checked)} tool calls waited for auto mode's safety check (p50 ${durationText(check.checked_p50_ms)}, call to result). Run Claude Code through the timing proxy to split each into the check model's time and the command's own time.</p></div>`;
+  }
+  const rows = (check.by_model || []).map((row) => {
+    const retries = row.requests - row.tool_calls;
+    return `<tr><th scope="row"><i class="lat-dot lat-auto_check" aria-hidden="true"></i>Safety check</th><td>${escapeHtml(row.model)}</td><td>${ints(row.tool_calls)}</td><td>${ints(row.requests)}${retries > 0 ? `<small> · ${ints(retries)} extra</small>` : ""}</td><td>${durationText(row.check_p50_ms)}</td><td>${durationText(row.check_total_ms)}</td><td>${durationText(row.request_p50_ms)} per request · ${row.output_tokens_p50 == null ? "—" : ints(row.output_tokens_p50)} output tokens p50</td></tr>`;
+  }).join("");
+  return `<div class="check-breakdown"><h4>Inside tool calls · ${ints(check.measured)} timed by the proxy</h4><div class="table-scroll"><table class="latency-table"><thead><tr><th scope="col">Part</th><th scope="col">Model</th><th scope="col">Tool calls</th><th scope="col">Requests</th><th scope="col">p50 per tool call</th><th scope="col">Total</th><th scope="col">Per check request</th></tr></thead><tbody>${rows}<tr><th scope="row"><i class="lat-dot lat-tool" aria-hidden="true"></i>Running the command</th><td>—</td><td>${ints(check.measured)}</td><td>—</td><td>${durationText(check.run_p50_ms)}</td><td>${durationText(check.run_total_ms)}</td><td>Call to result, minus the check</td></tr></tbody></table></div></div>`;
 }
 
 function latencyBox(session, disclosureKey) {
@@ -290,8 +320,8 @@ function latencyBox(session, disclosureKey) {
   if (!latency) return "";
   const main = latency.main;
   const breakdown = main.breakdown_ms;
-  const active = LATENCY_PARTS.reduce((sum, [key]) => sum + (breakdown[key] || 0), 0);
-  const bottleneck = active > 0 ? LATENCY_PARTS.reduce((best, part) => (breakdown[part[0]] || 0) > (breakdown[best[0]] || 0) ? part : best) : [null, "—"];
+  const active = activeMs(breakdown);
+  const bottleneck = active > 0 ? LATENCY_PARTS.reduce((best, part) => partMs(breakdown, part[0]) > partMs(breakdown, best[0]) ? part : best) : [null, "—"];
   const approvals = main.approvals;
   const tools = main.tool_summary.map((tool) => `<tr><th scope="row">${escapeHtml(tool.name)}</th><td>${ints(tool.count)}</td><td>${durationText(tool.duration_ms)}</td><td>${durationText(tool.p50_ms)}</td><td>${durationText(tool.max_ms)}</td></tr>`).join("");
   const subagents = latency.subagents.map((agent) => `<div class="latency-agent"><div><b>${escapeHtml(agent.label)}</b><small>${agent.request_count} requests · ${agent.tool_count} tool calls · TTFT p50 ${durationText(agent.ttft_p50_ms)} · ${rate(agent.tokens_per_s_p50)}</small></div>${latencyBar(agent.breakdown_ms, agent.label)}</div>`).join("");
@@ -300,7 +330,7 @@ function latencyBox(session, disclosureKey) {
   return `<section class="latency-box" aria-label="Where the time went">
     <div class="timing-heading"><h3>Where the time went</h3><span>${durationText(active)} active · ${durationText(breakdown.idle)} idle between turns</span></div>
     ${timelineBox(session, disclosureKey)}
-    <div class="latency-legend">${LATENCY_PARTS.map(([key, name, help]) => `<span title="${escapeHtml(help)}"><i class="lat-dot lat-${key}" aria-hidden="true"></i>${name} <b>${durationText(breakdown[key] || 0)}</b> <small>${pctOf(breakdown, key)}</small></span>`).join("")}</div>
+    <div class="latency-legend">${LATENCY_PARTS.map(([key, name, help]) => `<span title="${escapeHtml(help)}"><i class="lat-dot lat-${key}" aria-hidden="true"></i>${name} <b>${durationText(partMs(breakdown, key))}</b> <small>${pctOf(breakdown, key)}</small>${key === "tool" ? checkShare(breakdown, main.auto_check?.measured > 0) : ""}</span>`).join("")}</div>
     <div class="tl-head"><b>Whole session</b><span class="subtle">Main agent active time by share</span></div>
     ${latencyBar(breakdown, "Main agent active time")}
     <div class="latency-stats">
@@ -311,12 +341,13 @@ function latencyBox(session, disclosureKey) {
       <div><span>Tool calls</span><b>${ints(main.tool_count)}</b><small>Approved by rule ${approvals.rule} · auto-mode ${approvals["auto-mode check"]} · you ${approvals.you}${main.tool_errors ? ` · ${main.tool_errors} errors` : ""}</small></div>
       ${autoCheckStat(main.auto_check)}
     </div>
+    ${checkBreakdown(main.auto_check)}
     ${serverSplit(main.server_side)}
     ${subagents ? `<div class="latency-agents"><h4>Subagents · run alongside the main agent</h4>${subagents}</div>` : ""}
     <details class="timing-details" data-disclosure="${escapeHtml(openKey)}" ${disclosureStates.get(openKey) ? "open" : ""}><summary>Tools, requests and how this is measured</summary>
       ${tools ? `<div class="table-scroll"><table class="latency-table"><thead><tr><th scope="col">Tool</th><th scope="col">Calls</th><th scope="col">Total</th><th scope="col">p50</th><th scope="col">Slowest</th></tr></thead><tbody>${tools}</tbody></table></div>` : ""}
       <div class="table-scroll latency-requests" data-scroll="latency-${escapeHtml(disclosureKey)}"><table class="latency-table"><thead><tr><th scope="col">Sent</th><th scope="col">Model</th><th scope="col">First token</th><th scope="col">Generating</th><th scope="col">Output</th><th scope="col">Speed</th><th scope="col">Cached</th><th scope="col">Upstream first token</th><th scope="col">Tools</th></tr></thead><tbody>${requests}</tbody></table></div>
-      <p class="timing-note">Measured by the client from Claude Code's own log timestamps; each instant counts once, using the order in the legend. Time to first token combines network, provider queue and prefill; Claude Code doesn't record the provider's server-side split. "≤" marks responses that began with text, where only an upper bound is known. "Running tools" is pure command time; calls cleared by auto mode's safety classifier are shown apart, because that check is a model request Claude Code doesn't log. Run the timing proxy to time the check on its own. Totals per tool add overlapping calls; the bar does not.</p>
+      <p class="timing-note">Measured by the client from Claude Code's own log timestamps; each instant counts once, using the order in the legend. Time to first token combines network, provider queue and prefill; Claude Code doesn't record the provider's server-side split. "≤" marks responses that began with text, where only an upper bound is known. Tool calls run from the call until the result came back, including auto mode's safety check, which is a model request Claude Code doesn't log; the darker share marks checked calls, and the timing proxy times the check on its own. Totals per tool add overlapping calls; the bar does not.</p>
     </details>
   </section>`;
 }
@@ -324,11 +355,12 @@ function latencyBox(session, disclosureKey) {
 function renderLatencyComparison(rows) {
   const body = document.getElementById("latencyRows");
   if (!body) return;
-  body.innerHTML = rows.map((row) => `<tr><th scope="row"><span class="provider-chip ${row.provider}">${row.provider === "sambanova" ? "SambaNova" : row.provider === "claude" ? "Claude" : "Other"}</span>${escapeHtml(row.model)}</th><td>${ints(row.requests)}<small> · ${row.sessions} sessions</small></td><td>${durationText(row.ttft_p50_ms)}</td><td>${durationText(row.ttft_p90_ms)}</td><td>${rate(row.tokens_per_s_p50)}</td><td class="latency-share">${latencyBar(row.breakdown_ms, row.model)}<small>${LATENCY_PARTS.map(([key, name]) => `<span class="share-item"><i class="lat-dot lat-${key}" aria-hidden="true"></i>${name} ${pctOf(row.breakdown_ms, key)}</span>`).join("")}</small></td></tr>`).join("")
+  body.innerHTML = rows.map((row) => `<tr><th scope="row"><span class="provider-chip ${row.provider}">${row.provider === "sambanova" ? "SambaNova" : row.provider === "claude" ? "Claude" : "Other"}</span>${escapeHtml(row.model)}</th><td>${ints(row.requests)}<small> · ${row.sessions} sessions</small></td><td>${durationText(row.ttft_p50_ms)}</td><td>${durationText(row.ttft_p90_ms)}</td><td>${rate(row.tokens_per_s_p50)}</td><td class="latency-share">${latencyBar(row.breakdown_ms, row.model)}<small>${LATENCY_PARTS.map(([key, name]) => `<span class="share-item"><i class="lat-dot lat-${key}" aria-hidden="true"></i>${name} ${pctOf(row.breakdown_ms, key)}${key === "tool" ? checkShare(row.breakdown_ms, false) : ""}</span>`).join("")}</small></td></tr>`).join("")
     || '<tr><td colspan="6" class="empty">No timed model requests yet.</td></tr>';
   const legend = document.getElementById("latencyLegend");
   if (legend && !legend.innerHTML) legend.innerHTML = LATENCY_PARTS.map(([key, name, help]) =>
     `<div><dt><i class="lat-dot lat-${key}" aria-hidden="true"></i>${name}</dt><dd>${help}.</dd></div>`).join("")
+    + '<div><dt><i class="lat-dot lat-auto_check" aria-hidden="true"></i>Darker share of tool calls</dt><dd>Calls that waited for auto mode\'s safety check, an extra model request Claude Code doesn\'t log. With the timing proxy, only the check itself.</dd></div>'
     + '<div><dt><i class="lat-dot lat-idle-key" aria-hidden="true"></i>Idle (not in the bar)</dt><dd>Time between turns, such as waiting for your next message. Left out so the bar shows only working time.</dd></div>';
 }
 

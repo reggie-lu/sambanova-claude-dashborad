@@ -267,25 +267,27 @@ writes, so it works the same for SambaNova-backed and Claude-backed sessions:
 | Waiting for first token | `api-request` sent → first token (finished block minus `thinkingDurationMs` / `toolInputStreamMs`) |
 | Generating | First token → last response block |
 | Waiting for your approval | Tool calls whose `permissionDecision` came from you |
-| Auto-mode check + run | Tool calls cleared by auto mode's safety classifier (`reasonType: classifier`), `tool_use` → `tool_result` |
-| Running tools | Tool calls that skipped the check (allowed by a rule or the permission mode): the command's own run time |
+| Tool calls | `tool_use` block → its `tool_result`: auto mode's safety check, when there is one, plus the command. The darker share is calls cleared by the check (`reasonType: classifier`); with the timing proxy, only the check itself |
 | Claude Code overhead | Remaining time inside a turn (`turn_duration`) |
 | Idle | Time between turns |
 
 Overlapping intervals count once, in that priority order, so the parts add up to the
 session span.
 
-**Why the auto-mode check is its own part.** In auto mode, Claude Code asks a model
+**Why the auto-mode check is shaded inside tool calls.** In auto mode, Claude Code asks a model
 whether each command is safe before running it. That classifier call is a full model
 request (first-token wait plus generation) on the session's provider, and Claude Code
 doesn't write it to the transcript. With a slow first token, it dominates tool time:
 in one GLM-5.3 session, auto-checked calls took 18.8 s p50 while calls of the same tools
 allowed by a rule took 44 ms. The transcript alone can't tell the check apart from the
-command's run, so the part is labeled "check + run", and the **Auto-mode check** stat
+command's run, so without the proxy the darker share is the whole checked call, and the **Auto-mode check** stat
 compares checked calls with calls of the same tools that skipped the check. Under the
 timing proxy below, the classifier requests are logged, so the check is timed exactly
 (proxied requests with no matching transcript response, inside the tool call) and the
-rest of the call counts as Running tools. Allowing common safe commands in
+rest of the call stays plain tool time. The **Inside tool calls** table then splits checked
+calls into the safety check, one row per check model (requests, extra requests from retries,
+p50 time and output tokens per request), and the command's own running time, which makes a
+check-model change such as `CLAUDE_CODE_AUTO_MODE_MODEL` easy to compare. Allowing common safe commands in
 `.claude/settings.json` skips the check for them.
 
 On SambaNova, Claude Code first asks for Claude Sonnet 5 for the check, gets a 404 and
@@ -297,6 +299,24 @@ fast model instead:
 ```bash
 export CLAUDE_CODE_AUTO_MODE_MODEL=gemma-4-31B-it
 ```
+
+**Simplest setup: `scripts/sncc`.** It starts the timing proxy when it isn't running and
+launches Claude Code on GLM-5.3 with the check model set to `GLM-5.3-check`. The proxy sends
+that name as GLM-5.3 with `output_config.effort: "low"`, so the check answers without a long
+reasoning pass (a direct low-effort request returned 17 tokens in 0.54 s, against 2,048
+tokens and no verdict in 12 s by default). No Claude account or extra key is needed.
+
+```bash
+# ~/.zshrc
+export SAMBANOVA_API_KEY="..."
+alias sncc=~/Work/sambanova-claude-dashborad/scripts/sncc
+
+sncc            # or: sncc --resume
+```
+
+`SNCC_CHECK_MODEL=gemma-4-31B-it sncc` uses gemma instead. `scripts/check_requests.py`
+marks rewritten checks `(low effort)`; run `scripts/safety_report.py` after a change of
+check model to confirm risky commands are still blocked.
 
 Two scripts compare check models through the timing proxy:
 

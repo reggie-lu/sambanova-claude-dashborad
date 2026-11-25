@@ -121,9 +121,14 @@ class LatencyTests(unittest.TestCase):
         self.assertIsNone(session_latency([("Main agent", [])]))
 
 
-def proxied(message_id, start, end, session_id=None):
-    return {message_id: {"message_id": message_id, "received_ms": _ms(start), "end_ms": _ms(end),
-                         "upstream_sent_ms": _ms(start), "claude_session_id": session_id}}
+def proxied(message_id, start, end, session_id=None, model=None, output_tokens=None):
+    record = {"message_id": message_id, "received_ms": _ms(start), "end_ms": _ms(end),
+              "upstream_sent_ms": _ms(start), "claude_session_id": session_id}
+    if model:
+        record["model"] = model
+    if output_tokens is not None:
+        record["usage"] = {"output_tokens": output_tokens}
+    return {message_id: record}
 
 
 class AutoModeCheckTests(unittest.TestCase):
@@ -142,7 +147,23 @@ class AutoModeCheckTests(unittest.TestCase):
         self.assertEqual((summary["measured"], summary["check_p50_ms"]), (1, 2800))
         t = result["timeline"]
         labels = [(t["categories"][c], t["labels"][l]) for _, _, c, l in t["segments"]]
-        self.assertIn(("auto_check", "auto-mode check"), labels)
+        self.assertIn(("auto_check", "auto-mode check · unknown model"), labels)
+
+    def test_checks_are_broken_down_by_check_model(self):
+        # Inside the 6-10 s Bash call: two gemma requests (a retry), then 1 s of running.
+        proxy = {**proxied("c1", 6.1, 7.1, model="gemma-4-31B-it", output_tokens=7),
+                 **proxied("c2", 7.2, 9.0, model="gemma-4-31B-it", output_tokens=9)}
+        result = stream_latency(session(), "Main agent", proxy)
+        summary = result["auto_check"]
+        self.assertEqual(summary["check_total_ms"], 2800)
+        self.assertEqual((summary["run_p50_ms"], summary["run_total_ms"]), (1200, 1200))
+        [gemma] = summary["by_model"]
+        self.assertEqual(gemma["model"], "gemma-4-31B-it")
+        self.assertEqual((gemma["tool_calls"], gemma["requests"]), (1, 2))
+        self.assertEqual((gemma["request_p50_ms"], gemma["output_tokens_p50"]), (1800, 9))  # nearest rank
+        self.assertEqual((gemma["check_p50_ms"], gemma["run_p50_ms"]), (2800, 1200))
+        t = result["timeline"]
+        self.assertIn("auto-mode check · gemma-4-31B-it", t["labels"])
 
     def test_proxy_checks_are_clipped_to_the_tool_interval(self):
         result = stream_latency(session(), "Main agent", proxied("classifier", 5.5, 30))
@@ -169,6 +190,7 @@ class AutoModeCheckTests(unittest.TestCase):
         self.assertEqual((summary["checked"], summary["checked_p50_ms"]), (1, 4000))
         self.assertEqual((summary["unchecked"], summary["unchecked_p50_ms"]), (1, 100))  # Edit not compared
         self.assertIsNone(summary["check_p50_ms"])
+        self.assertEqual(summary["by_model"], [])
 
     def test_no_auto_checked_calls_means_no_summary(self):
         records = session()

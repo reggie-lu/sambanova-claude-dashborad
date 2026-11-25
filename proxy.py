@@ -9,6 +9,11 @@ one JSONL record with timestamps (arrival, upstream headers, first token, end), 
 response message ID for joining with Claude Code's transcript, token counts, and any
 server-side timing the provider reports in usage or headers. It never records API
 keys, prompts, or response text.
+
+Fast safety check: a request for a model named `<model>-check` (set
+CLAUDE_CODE_AUTO_MODE_MODEL=GLM-5.3-check) is sent as `<model>` with
+output_config.effort "low", so auto mode's check answers without a long reasoning pass.
+Only those requests change; the main loop passes through as is.
 """
 from __future__ import annotations
 
@@ -41,6 +46,7 @@ STANDARD_USAGE = {"input_tokens", "output_tokens", "cache_read_input_tokens",
                   "speed", "fallback_credit"}
 TIMING_HEADER = re.compile(r"time|latency|duration|queue", re.I)
 SESSION_HEADER = "x-claude-code-session-id"
+CHECK_SUFFIX = "-check"
 _write_lock = threading.Lock()
 
 
@@ -122,6 +128,50 @@ class StreamTimer:
             self.merge_usage(payload.get("usage"))
 
 
+def _short(value: Any) -> Any:
+    """Numbers, booleans and short words only: settings, never content."""
+    if isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str) and len(value) <= 40:
+        return value
+    return None
+
+
+def _count_cache_markers(value: Any, depth: int = 0) -> int:
+    if depth > 12:
+        return 0
+    if isinstance(value, dict):
+        return ("cache_control" in value) + sum(_count_cache_markers(item, depth + 1) for item in value.values())
+    if isinstance(value, list):
+        return sum(_count_cache_markers(item, depth + 1) for item in value)
+    return 0
+
+
+def request_settings(request: Any) -> dict[str, Any]:
+    """How the client asked: output limit, thinking, effort, tools, cache markers.
+    Records settings only, never prompt text, tool definitions or schemas."""
+    if not isinstance(request, dict):
+        return {}
+    settings: dict[str, Any] = {}
+    for key in ("max_tokens", "temperature", "top_p"):
+        if _short(request.get(key)) is not None:
+            settings[key] = _short(request[key])
+    for key in ("thinking", "output_config", "tool_choice"):
+        block = request.get(key)
+        if isinstance(block, dict):
+            kept = {name: _short(value) for name, value in block.items()
+                    if name in {"type", "budget_tokens", "effort", "display", "disable_parallel_tool_use"}
+                    and _short(value) is not None}
+            if kept:
+                settings[key] = kept
+    if isinstance(request.get("tools"), list):
+        settings["tools"] = len(request["tools"])
+    if isinstance(request.get("messages"), list):
+        settings["messages"] = len(request["messages"])
+    settings["cache_markers"] = _count_cache_markers({key: request.get(key) for key in ("system", "messages", "tools")})
+    return settings
+
+
 def server_metrics(usage: dict[str, Any], headers: list[tuple[str, str]]) -> dict[str, Any]:
     """Anything beyond standard token counts: provider-reported timing lives here."""
     metrics = {key: value for key, value in usage.items()
@@ -143,6 +193,17 @@ def write_record(record: dict[str, Any], path: Path) -> None:
             os.close(descriptor)
 
 
+def fast_check(request_json: Any) -> bool:
+    """`<model>-check` → `<model>` with low effort, in place. True when it applied."""
+    model = request_json.get("model") if isinstance(request_json, dict) else None
+    if not (isinstance(model, str) and model.lower().endswith(CHECK_SUFFIX) and len(model) > len(CHECK_SUFFIX)):
+        return False
+    request_json["model"] = model[:-len(CHECK_SUFFIX)]
+    config = request_json.get("output_config")
+    request_json["output_config"] = {**(config if isinstance(config, dict) else {}), "effort": "low"}
+    return True
+
+
 def make_handler(log_path: Path, connect_to: tuple[str, int] | None = None,
                  scheme: str = "https") -> type[BaseHTTPRequestHandler]:
     """`connect_to` and `scheme` redirect the connection itself; tests use a local fake upstream."""
@@ -153,6 +214,14 @@ def make_handler(log_path: Path, connect_to: tuple[str, int] | None = None,
             pass
 
         def do_GET(self) -> None:
+            if self.path == "/status":  # lets launchers find a running proxy
+                payload = json.dumps({"fast_check": True}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
             self.forward()
 
         def do_POST(self) -> None:
@@ -178,6 +247,9 @@ def make_handler(log_path: Path, connect_to: tuple[str, int] | None = None,
             except ValueError:
                 request_json = {}
             headers = {name: value for name, value in self.headers.items() if name.lower() not in DROP_REQUEST}
+            checked = fast_check(request_json)
+            if checked:
+                body = json.dumps(request_json).encode()
             connection_class = http.client.HTTPSConnection if scheme == "https" else http.client.HTTPConnection
             kwargs: dict[str, Any] = {"timeout": 600}
             if scheme == "https":
@@ -191,6 +263,8 @@ def make_handler(log_path: Path, connect_to: tuple[str, int] | None = None,
                 "method": self.command, "request_model": request_json.get("model") if isinstance(request_json, dict) else None,
                 "stream": bool(isinstance(request_json, dict) and request_json.get("stream")),
                 "request_bytes": len(body), "claude_session_id": self.headers.get(SESSION_HEADER),
+                "request_settings": request_settings(request_json),
+                "fast_check": checked,
             }
             replied = False
             try:
@@ -278,6 +352,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Cost Lens timing proxy on http://{args.host}:{args.port}/via/<provider host>")
     print(f"  export ANTHROPIC_BASE_URL=http://{args.host}:{args.port}/via/api.sambanova.ai")
     print(f"  records → {args.output}")
+    print(f"  fast check: CLAUDE_CODE_AUTO_MODE_MODEL=<model>{CHECK_SUFFIX} → <model> at low effort")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

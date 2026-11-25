@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# sncc: Claude Code on SambaNova GLM-5.3 with a fast auto-mode safety check.
+#
+#   export SAMBANOVA_API_KEY=...   # once, in ~/.zshrc (falls back to ANTHROPIC_API_KEY)
+#   sncc                           # any claude flags work: sncc --resume
+#   SNCC_EFFORT=low sncc           # GLM-5.3 reasons less on every reply (put it in ~/.zshrc to keep it)
+#
+# Starts the local timing proxy if it isn't running, then runs claude through it. The
+# safety check asks for "GLM-5.3-check", which the proxy sends as GLM-5.3 at low effort.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PORT="${SNCC_PORT:-8787}"
+MODEL="${SNCC_MODEL:-GLM-5.3}"
+KEY="${SAMBANOVA_API_KEY:-${ANTHROPIC_API_KEY:-}}"
+[ -n "$KEY" ] || { echo "sncc: set SAMBANOVA_API_KEY first" >&2; exit 1; }
+
+running() { curl -fsS --max-time 1 "http://127.0.0.1:$PORT/status" 2>/dev/null | grep -q fast_check; }
+
+if ! running; then
+  nohup python3 "$HERE/proxy.py" --port "$PORT" >"${TMPDIR:-/tmp}/sncc-proxy.log" 2>&1 &
+  for _ in $(seq 30); do running && break; sleep 0.1; done
+  running || { echo "sncc: proxy did not start (old one on port $PORT? pkill -f proxy.py)" >&2; exit 1; }
+fi
+
+export ANTHROPIC_BASE_URL="http://127.0.0.1:$PORT/via/api.sambanova.ai"
+export ANTHROPIC_API_KEY="$KEY"
+export ANTHROPIC_MODEL="$MODEL"
+export CLAUDE_CODE_AUTO_MODE_MODEL="${SNCC_CHECK_MODEL:-$MODEL-check}"
+EFFORT=()
+[ -n "${SNCC_EFFORT:-}" ] && EFFORT=(--effort "$SNCC_EFFORT")
+echo "sncc: $MODEL on SambaNova${SNCC_EFFORT:+ at $SNCC_EFFORT effort} · safety check: $CLAUDE_CODE_AUTO_MODE_MODEL" >&2
+exec claude ${EFFORT[@]+"${EFFORT[@]}"} "$@"

@@ -131,6 +131,23 @@ class ProxyTests(ProxyCase):
         self.assertLessEqual(record["headers_ms"], record["first_token_ms"])
         self.assertLess(record["first_token_ms"], record["end_ms"])
 
+    def test_request_settings_are_recorded_without_content(self):
+        self.post("/via/api.sambanova.ai/v1/messages", {
+            "model": "GLM-5.3", "max_tokens": 2048, "temperature": 0,
+            "thinking": {"type": "disabled", "budget_tokens": 1024, "note": "private prompt"},
+            "output_config": {"effort": "low"}, "tool_choice": {"type": "tool", "name": "private prompt"},
+            "system": [{"type": "text", "text": "private prompt", "cache_control": {"type": "ephemeral"}}],
+            "tools": [{"name": "classify", "description": "private prompt"}],
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "private prompt",
+                                                       "cache_control": {"type": "ephemeral"}}]}]})
+        raw = self.logged()
+        self.assertNotIn("private prompt", raw)
+        self.assertNotIn("classify", raw)
+        self.assertEqual(json.loads(raw)["request_settings"], {
+            "max_tokens": 2048, "temperature": 0, "thinking": {"type": "disabled", "budget_tokens": 1024},
+            "output_config": {"effort": "low"}, "tool_choice": {"type": "tool"}, "tools": 1, "messages": 1,
+            "cache_markers": 2})
+
     def test_non_streaming_responses_keep_their_length(self):
         response, body = self.post("/via/api.sambanova.ai/v1/messages", {"model": "GLM-5.3"})
         self.assertEqual(json.loads(body)["id"], "msg_2")
@@ -142,6 +159,40 @@ class ProxyTests(ProxyCase):
         self.assertEqual(FakeUpstream.seen, [])
         self.assertIsNone(upstream_for("/v1/messages"))
         self.assertEqual(upstream_for("/via/api.sambanova.ai/v1/messages"), ("api.sambanova.ai", "/v1/messages"))
+
+
+class FastCheckTests(ProxyCase):
+    def test_check_alias_is_sent_as_the_real_model_at_low_effort(self):
+        self.post("/via/api.sambanova.ai/v1/messages",
+                  {"model": "GLM-5.3-check", "max_tokens": 64, "output_config": {"format": "x"}})
+        _, headers, body = FakeUpstream.seen[0]
+        sent = json.loads(body)
+        self.assertEqual(sent["model"], "GLM-5.3")
+        self.assertEqual(sent["output_config"], {"format": "x", "effort": "low"})
+        self.assertEqual(headers["x-api-key"], "secret-key")
+        record = json.loads(self.logged())
+        self.assertEqual((record["request_model"], record["fast_check"]), ("GLM-5.3", True))  # what was sent
+        self.assertEqual(record["request_settings"]["output_config"]["effort"], "low")
+
+    def test_main_loop_requests_pass_through_untouched(self):
+        self.post("/via/api.sambanova.ai/v1/messages", {"model": "GLM-5.3", "max_tokens": 64})
+        _, _, body = FakeUpstream.seen[0]
+        self.assertEqual(json.loads(body), {"model": "GLM-5.3", "max_tokens": 64})
+        self.assertFalse(json.loads(self.logged())["fast_check"])
+
+    def test_status_answers(self):
+        connection = http.client.HTTPConnection("127.0.0.1", self.proxy.server_port, timeout=10)
+        connection.request("GET", "/status")
+        self.assertEqual(json.loads(connection.getresponse().read()), {"fast_check": True})
+        connection.close()
+
+    def test_alias_rules(self):
+        from proxy import fast_check
+        for model in ("-check", "GLM-5.3", None):
+            self.assertFalse(fast_check({"model": model}))
+        request = {"model": "gemma-4-31B-it-check", "output_config": "junk"}
+        self.assertTrue(fast_check(request))
+        self.assertEqual(request, {"model": "gemma-4-31B-it", "output_config": {"effort": "low"}})
 
 
 class ProxyEdgeTests(ProxyCase):
